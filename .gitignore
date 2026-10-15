@@ -1,0 +1,14 @@
+# Local build output and downloaded installer tools
+/build/
+/build-test/
+/build-tools/
+/.codex-remote-attachments/
+/.vs/
+/.idea/
+CMakeUserPresets.json
+*.user
+*.suo
+# Local credentials
+.env
+.env.*
+!.env.example
