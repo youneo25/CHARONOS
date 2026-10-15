@@ -8,12 +8,15 @@ $taskWorkspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $taskBuild = if ([IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $taskWorkspace $BuildDir }
 $taskVersion = [regex]::Match((Get-Content (Join-Path $taskWorkspace 'CMakeLists.txt') -Raw), 'project\(CHRONOS VERSION ([\d.]+)').Groups[1].Value
 if (!$taskVersion) { throw 'Cannot read application version.' }
+$taskDisplayVersion = 'Beta ' + $taskVersion
+$taskPackageVersion = $taskVersion + '-beta'
 $taskDate = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([datetime]::UtcNow,'Korea Standard Time').ToString('yyyy-MM-dd')
-$taskOutput = Join-Path (Join-Path $OutputRoot $taskDate) ('charonos-' + $taskVersion + '-installer-' + [guid]::NewGuid().ToString('N').Substring(0,8))
-$taskPackage = Join-Path $taskOutput ('CHARONOS-' + $taskVersion + '-win64')
+$taskOutput = Join-Path (Join-Path $OutputRoot $taskDate) ('charonos-' + $taskPackageVersion + '-installer-' + [guid]::NewGuid().ToString('N').Substring(0,8))
+$taskPackage = Join-Path $taskOutput ('CHARONOS-' + $taskPackageVersion + '-win64')
 $taskQt = 'C:\dev\Qt\6.10.3\msvc2022_64'
 $taskExe = Join-Path $taskBuild 'CHARONOS.exe'
 if (!(Test-Path -LiteralPath $taskExe)) { throw 'Build CHARONOS first.' }
+if ((Get-Item -LiteralPath $taskExe).VersionInfo.ProductVersion -ne $taskDisplayVersion) { throw 'Build version does not match the source version. Rebuild CHARONOS first.' }
 if (!$Compiler) { $Compiler = Join-Path $taskWorkspace 'build-tools\InnoSetup\ISCC.exe' }
 if (!(Test-Path -LiteralPath $Compiler)) { throw 'Pass -Compiler with the path to Inno Setup ISCC.exe.' }
 New-Item -ItemType Directory -Path $taskPackage | Out-Null
@@ -37,13 +40,14 @@ Copy-Item -LiteralPath (Join-Path $taskWorkspace 'docs\QA-2.4.0.md') -Destinatio
 Copy-Item -LiteralPath (Join-Path $taskWorkspace 'docs\QA-2.4.1.md') -Destination $taskPackage
 Copy-Item -LiteralPath (Join-Path $taskWorkspace 'docs\QA-2.4.2.md') -Destination $taskPackage
 Copy-Item -LiteralPath (Join-Path $taskWorkspace 'docs\QA-2.4.3.md') -Destination $taskPackage
+Copy-Item -LiteralPath (Join-Path $taskWorkspace 'docs\QA-Beta-0.0.1.md') -Destination $taskPackage
 New-Item -ItemType Directory -Path (Join-Path $taskPackage 'LICENSES') | Out-Null
 Copy-Item -LiteralPath 'C:\dev\ffmpeg\LICENSE.txt' -Destination (Join-Path $taskPackage 'LICENSES\FFmpeg-GPL-3.0.txt')
 if ((Get-FileHash $taskExe).Hash -ne (Get-FileHash (Join-Path $taskPackage 'CHARONOS.exe')).Hash) { throw 'EXE copy verification failed.' }
-& $Compiler "/DPackageDir=$taskPackage" "/DVersion=$taskVersion" "/DOutputDir=$taskOutput" (Join-Path $PSScriptRoot 'charonos.iss')
+& $Compiler "/DPackageDir=$taskPackage" "/DVersion=$taskVersion" "/DDisplayVersion=$taskDisplayVersion" "/DPackageVersion=$taskPackageVersion" "/DOutputDir=$taskOutput" (Join-Path $PSScriptRoot 'charonos.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
-$taskSourceZip = Join-Path $taskOutput ('CHARONOS-' + $taskVersion + '-source.zip')
-$taskSourcePaths = @('src','tools','res','docs','README.md','CMakeLists.txt','build.bat','build-test.bat') | ForEach-Object { Join-Path $taskWorkspace $_ }
+$taskSourceZip = Join-Path $taskOutput ('CHARONOS-' + $taskPackageVersion + '-source.zip')
+$taskSourcePaths = @('src','tools','res','docs','README.md','CMakeLists.txt','build.bat','build-test.bat','.gitignore') | ForEach-Object { Join-Path $taskWorkspace $_ }
 Compress-Archive -LiteralPath $taskSourcePaths -DestinationPath $taskSourceZip -CompressionLevel Optimal
 $taskQa = Join-Path $taskOutput 'QA'; New-Item -ItemType Directory -Path $taskQa | Out-Null
 Copy-Item -LiteralPath (Join-Path $taskWorkspace 'build-test\feature-results.txt') -Destination $taskQa
@@ -54,11 +58,12 @@ Copy-Item -LiteralPath (Join-Path $taskWorkspace 'docs\QA-2.4.0.md') -Destinatio
 Copy-Item -LiteralPath (Join-Path $taskWorkspace 'docs\QA-2.4.1.md') -Destination $taskQa
 Copy-Item -LiteralPath (Join-Path $taskWorkspace 'docs\QA-2.4.2.md') -Destination $taskQa
 Copy-Item -LiteralPath (Join-Path $taskWorkspace 'docs\QA-2.4.3.md') -Destination $taskQa
+Copy-Item -LiteralPath (Join-Path $taskWorkspace 'docs\QA-Beta-0.0.1.md') -Destination $taskQa
 Get-ChildItem -LiteralPath (Join-Path $taskWorkspace 'build-test') -Filter 'qa-startup-*.txt' | Copy-Item -Destination $taskQa
 Copy-Item -LiteralPath (Join-Path $taskWorkspace 'docs\KEYFRAME-PRO-2-analysis.md') -Destination $taskQa
 Get-ChildItem -LiteralPath (Join-Path $taskWorkspace 'build-test') -Filter 'qa-*.png' | Copy-Item -Destination $taskQa
 Get-ChildItem -LiteralPath (Join-Path $taskWorkspace 'build-test') -Filter '*performance*.txt' | Copy-Item -Destination $taskQa
-$taskSetup = Join-Path $taskOutput ('CHARONOS-' + $taskVersion + '-Setup-x64.exe')
+$taskSetup = Join-Path $taskOutput ('CHARONOS-' + $taskPackageVersion + '-Setup-x64.exe')
 Get-FileHash -LiteralPath $taskSetup,$taskSourceZip | ForEach-Object { $_.Hash.ToLowerInvariant() + '  ' + [IO.Path]::GetFileName($_.Path) } |
     Set-Content -LiteralPath (Join-Path $taskOutput 'SHA256SUMS.txt') -Encoding ascii
 Write-Output "OUTPUT=$taskOutput"

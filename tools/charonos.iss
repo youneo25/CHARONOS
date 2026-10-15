@@ -2,13 +2,19 @@
   #error PackageDir must point to the deployed application folder
 #endif
 #ifndef Version
-  #define Version "2.3.0"
+  #define Version "0.0.1"
+#endif
+#ifndef DisplayVersion
+  #define DisplayVersion "Beta " + Version
+#endif
+#ifndef PackageVersion
+  #define PackageVersion Version + "-beta"
 #endif
 
 [Setup]
 AppId={{541A5B3B-408C-478D-AD80-2AE20787183E}
 AppName=CHARONOS
-AppVersion={#Version}
+AppVersion={#DisplayVersion}
 AppPublisher=CHARONOS
 DefaultDirName={localappdata}\Programs\CHARONOS
 DefaultGroupName=CHARONOS
@@ -16,7 +22,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
-OutputBaseFilename=CHARONOS-{#Version}-Setup-x64
+OutputBaseFilename=CHARONOS-{#PackageVersion}-Setup-x64
 SetupIconFile=..\res\app.ico
 UninstallDisplayIcon={app}\CHARONOS.exe
 Compression=lzma2
@@ -27,6 +33,8 @@ CloseApplications=yes
 RestartApplications=no
 ChangesAssociations=yes
 VersionInfoVersion={#Version}
+VersionInfoTextVersion={#DisplayVersion}
+VersionInfoProductTextVersion={#DisplayVersion}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
