@@ -12,12 +12,13 @@ public:
         m_info.duration = m_info.frameCount / m_info.fps;
         m_info.codec = "2D Canvas";
         m_info.isImageSequence = true;
+        m_info.decoderName = QStringLiteral("Canvas");
         m_image = QImage(m_info.width, m_info.height, QImage::Format_RGBA8888);
         m_image.fill(QColor(32, 32, 32));
     }
     const MediaInfo& info() const override { return m_info; }
     bool supportsParallelDecode() const override { return true; }
-    bool decode(int64_t index, QImage& out, QString* error, const FrameSink* = nullptr) override {
+    bool decode(int64_t index, QImage& out, QString* error) override {
         if (index < 0 || index >= m_info.frameCount) {
             if (error) *error = "Canvas frame out of range";
             return false;

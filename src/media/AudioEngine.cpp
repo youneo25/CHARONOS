@@ -47,7 +47,8 @@ AudioEngine::~AudioEngine()
     waveOutClose(wave(m_wave));
 }
 
-void AudioEngine::start(std::shared_ptr<const AudioClip> clip, double videoSec, double speed, double seconds)
+void AudioEngine::start(std::shared_ptr<const AudioClip> clip, std::shared_ptr<const AudioMix> mix, double videoSec, double speed,
+                        double seconds)
 {
     if (!m_wave) return;
     std::lock_guard lock(m_mutex);
@@ -55,19 +56,34 @@ void AudioEngine::start(std::shared_ptr<const AudioClip> clip, double videoSec, 
     m_continuous = false;
     if (waveOutReset(wave(m_wave)) != MMSYSERR_NOERROR) return;
     m_clip = std::move(clip);
+    m_mix = std::move(mix);
     m_speed = std::clamp(speed, 0.05, 8.0);
     m_startVideoSec = videoSec;
     m_submittedFrames = 0;
     m_positionClock.reset();
     m_started = std::chrono::steady_clock::now();
-    m_read = m_clip ? (videoSec - m_clip->startTime) * m_clip->rate : 0.0;
-    m_end = seconds > 0 ? m_read + seconds * AudioClip::kRate * m_speed : -1.0;
-    m_continuous = bool(m_clip) && seconds <= 0;
-    m_active = bool(m_clip);
+    const bool any = m_clip || m_mix;
+    if (m_mix) {
+        m_read = videoSec;  // timeline seconds
+        m_end = seconds > 0 ? m_read + seconds * m_speed : -1.0;
+    } else {
+        m_read = m_clip ? (videoSec - m_clip->startTime) * m_clip->rate : 0.0;
+        m_end = seconds > 0 ? m_read + seconds * AudioClip::kRate * m_speed : -1.0;
+    }
+    m_continuous = any && seconds <= 0;
+    m_active = any;
 }
 
-void AudioEngine::play(std::shared_ptr<const AudioClip> clip, double videoSec, double speed) { start(std::move(clip), videoSec, speed, 0); }
-void AudioEngine::snippet(std::shared_ptr<const AudioClip> clip, double videoSec, double seconds) { start(std::move(clip), videoSec, 1.0, seconds); }
+void AudioEngine::play(std::shared_ptr<const AudioClip> clip, double videoSec, double speed) { start(std::move(clip), nullptr, videoSec, speed, 0); }
+void AudioEngine::snippet(std::shared_ptr<const AudioClip> clip, double videoSec, double seconds) { start(std::move(clip), nullptr, videoSec, 1.0, seconds); }
+void AudioEngine::playMix(std::shared_ptr<const AudioMix> mix, double timelineSec, double speed) { start(nullptr, std::move(mix), timelineSec, speed, 0); }
+void AudioEngine::snippetMix(std::shared_ptr<const AudioMix> mix, double timelineSec, double seconds) { start(nullptr, std::move(mix), timelineSec, 1.0, seconds); }
+
+void AudioEngine::updateMix(std::shared_ptr<const AudioMix> mix)
+{
+    std::lock_guard lock(m_mutex);
+    if (m_mix && mix) m_mix = std::move(mix);
+}
 
 void AudioEngine::stop()
 {
@@ -75,6 +91,7 @@ void AudioEngine::stop()
     std::lock_guard lock(m_mutex);
     m_active = false;
     m_continuous = false;
+    m_mix.reset();
     waveOutReset(wave(m_wave));
 }
 
@@ -99,6 +116,19 @@ double AudioEngine::position() const
 void AudioEngine::fill(std::vector<int16_t>& block)
 {
     const double vol = m_muted ? 0.0 : std::clamp(m_volume.load(), 0.0, 1.0);
+    if (m_mix && m_active) {
+        // Timeline mix: m_read is timeline seconds.
+        m_mixBuf.assign(size_t(kBlockFrames) * 2, 0.f);
+        const double step = m_speed / AudioClip::kRate;
+        int frames = kBlockFrames;
+        if (m_end >= 0) frames = int(std::clamp((m_end - m_read) / step, 0.0, double(kBlockFrames)));
+        m_mix->render(m_read, step, frames, m_mixBuf.data());
+        for (size_t i = 0; i < block.size(); ++i)
+            block[i] = int16_t(std::lround(std::clamp(m_mixBuf[i] * vol, -1.0, 1.0) * 32767.0));
+        m_read += step * kBlockFrames;
+        if (m_end >= 0 && m_read >= m_end) m_active = false;
+        return;
+    }
     const AudioClip* c = m_active ? m_clip.get() : nullptr;
     const int64_t frames = c ? c->frames() : 0;
     for (int i = 0; i < kBlockFrames; ++i) {

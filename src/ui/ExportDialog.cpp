@@ -154,6 +154,11 @@ ExportDialog::ExportDialog(const Ranges& ranges, QWidget* parent)
     form->addRow(QString(), m_notes);
     form->addRow(QString(), m_caption);
     form->addRow(QString(), m_tracks);
+    m_filter = new QCheckBox(L("Viewer Filter: %1", "뷰어 필터: %1").arg(m_ranges.filterName));
+    m_filter->setObjectName("ExportFilter");
+    m_filter->setChecked(!m_ranges.filterName.isEmpty());
+    m_filter->setVisible(!m_ranges.filterName.isEmpty());
+    form->addRow(QString(), m_filter);
     form->addRow(QString(), m_audio);
     if (ranges.comparing) form->addRow(QString(), m_compare);
     form->addRow(key(L("Save To", "저장 위치")), pathRow);
@@ -206,6 +211,7 @@ bool ExportDialog::caption() const { return m_caption->isChecked(); }
 bool ExportDialog::tracks() const { return m_tracks->isChecked(); }
 bool ExportDialog::audio() const { return m_audio->isChecked() && m_audio->isEnabled(); }
 bool ExportDialog::comparison() const { return m_ranges.comparing && m_compare->isChecked(); }
+bool ExportDialog::filter() const { return m_filter && !m_ranges.filterName.isEmpty() && m_filter->isChecked(); }
 double ExportDialog::margin() const { return QList<double>{0, .10, .25, .50, 1}.value(m_margin->currentIndex()); }
 
 QJsonObject ExportDialog::presetValues() const

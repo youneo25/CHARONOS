@@ -23,6 +23,7 @@ public:
         double fps = 24.0;
         QString suggestedName;
         bool comparing = false;
+        QString filterName;  // the viewer's analysis filter, empty = none
     };
 
     ExportDialog(const Ranges& ranges, QWidget* parent = nullptr);
@@ -37,6 +38,7 @@ public:
     bool tracks() const;
     bool audio() const;
     bool comparison() const;
+    bool filter() const;  // burn in the viewer's analysis filter
     double margin() const;
 
 private:
@@ -60,6 +62,7 @@ private:
     QCheckBox* m_tracks;
     QCheckBox* m_audio;
     QCheckBox* m_compare;
+    QCheckBox* m_filter = nullptr;
     QLineEdit* m_path;
     QLabel* m_summary;
 };

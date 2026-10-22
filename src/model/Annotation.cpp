@@ -11,6 +11,7 @@ namespace {
 const QStringList kKnownKeys = {
     "id", "type", "color", "size", "opacity", "locked", "points", "pressure", "x1", "y1", "x2", "y2", "x", "y", "w", "h",
     "cx", "cy", "rx", "ry", "text", "fontSize", "fontFamily", "bold", "italic", "useBg", "bgColor", "src", "transform", "penStyle", "trackId", "trackAnchor",
+    "clip", "lane", "clipColor",
 };
 
 double num(const QJsonObject& o, const char* key, double fallback = 0.0)
@@ -40,6 +41,9 @@ QJsonObject Annotation::toJson() const
         o["trackAnchor"] = QJsonObject{{"x", trackAnchor.x()}, {"y", trackAnchor.y()}};
     }
     if (locked) o["locked"] = true;
+    if (!clipId.isEmpty()) o["clip"] = clipId;
+    if (lane >= 0) o["lane"] = lane;
+    if (clipColor.isValid()) o["clipColor"] = clipColor.name(QColor::HexRgb);
 
     if (type == "stroke") {
         QJsonArray pts;
@@ -94,6 +98,9 @@ Annotation Annotation::fromJson(const QJsonObject& o)
     a.trackId = o.value("trackId").toString();
     const auto anchor = o.value("trackAnchor").toObject();
     a.trackAnchor = QPointF(num(anchor, "x"), num(anchor, "y"));
+    a.clipId = o.value("clip").toString();
+    a.lane = std::clamp(o.value("lane").toInt(-1), -1, 255);
+    if (const QColor label = QColor::fromString(o.value("clipColor").toString()); label.isValid()) a.clipColor = label;
 
     for (const QJsonValue& v : o.value("points").toArray()) {
         const QJsonObject p = v.toObject();

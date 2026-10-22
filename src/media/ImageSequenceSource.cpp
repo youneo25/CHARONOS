@@ -67,10 +67,11 @@ bool ImageSequenceSource::open(const QStringList& files, double fps, QString* er
     m_info.codec = QStringLiteral("Image sequence (%1)").arg(QFileInfo(m_files.first()).suffix().toUpper());
     m_info.pixelFormat = QStringLiteral("RGBA");
     m_info.isImageSequence = true;
+    m_info.decoderName = QStringLiteral("Qt image reader");
     return true;
 }
 
-bool ImageSequenceSource::decode(int64_t index, QImage& out, QString* error, const FrameSink*)
+bool ImageSequenceSource::decode(int64_t index, QImage& out, QString* error)
 {
     if (index < 0 || index >= m_files.size()) return false;
     QImageReader reader(m_files.at(static_cast<qsizetype>(index)));

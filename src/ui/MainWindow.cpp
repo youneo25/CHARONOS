@@ -12,6 +12,10 @@
 #include "ui/ConsoleDock.h"
 #include "ui/HotkeyManager.h"
 #include "media/CanvasSource.h"
+#include "media/VideoDecoder.h"
+#include "ai/McpServer.h"
+#include "ui/MotionGraph.h"
+#include "ui/TimelineEditor.h"
 #include <QDirIterator>
 #include <QDialogButtonBox>
 #include <QDebug>
@@ -35,6 +39,8 @@
 #include <QComboBox>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QKeyEvent>
+#include <QPlainTextEdit>
 #include <QMimeData>
 #include <QFile>
 #include <QFileDialog>
@@ -130,16 +136,21 @@ QList<QPair<QString, QColor>> noteColors()
     };
 }
 
-enum TreeRole { RoleId = Qt::UserRole, RoleKind };
-
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
     QSettings settings;
+    setObjectName("MainWindow");
     m_realtime = settings.value("realtimePlayback", false).toBool();
-    m_media.setCacheBudget(settings.value("cacheBudgetBytes", totalPhysicalMemory() / 2).toLongLong());
+    {
+        // Keep the cache inside physical RAM even if the setting came from a bigger machine.
+        const qint64 ram = totalPhysicalMemory();
+        const qint64 saved = settings.value("cacheBudgetBytes", ram / 2).toLongLong();
+        m_media.setCacheBudget(std::clamp<qint64>(saved, qint64(256) << 20, std::max<qint64>(qint64(512) << 20, ram - (qint64(2) << 30))));
+    }
+    VideoDecoder::setHardwareDecodingEnabled(settings.value("decode/hardware", true).toBool());
 
     m_endlessScrubbing = settings.value("endlessScrubbing", true).toBool();
     m_view = new Viewport;
@@ -164,6 +175,8 @@ MainWindow::MainWindow(QWidget* parent)
     connect(&m_toastTimer, &QTimer::timeout, m_toast, &QLabel::hide);
 
     auto* left = new QSplitter(Qt::Vertical);
+    m_leftSplit = left;
+    left->setObjectName("LeftPanels");
     left->setChildrenCollapsible(false);
     left->addWidget(buildProjectPanel());
     left->addWidget(buildTimelinePanel());
@@ -179,6 +192,8 @@ MainWindow::MainWindow(QWidget* parent)
     left->setStretchFactor(1, 1);
 
     auto* main = new QSplitter(Qt::Horizontal);
+    m_mainSplit = main;
+    main->setObjectName("MainSplit");
     main->setChildrenCollapsible(false);
     main->addWidget(left);
     auto* strip = buildToolStrip();
@@ -199,13 +214,19 @@ MainWindow::MainWindow(QWidget* parent)
     rootLayout->setContentsMargins(0, 0, 0, 0);
     rootLayout->setSpacing(0);
     rootLayout->addWidget(main, 1);
-    rootLayout->addWidget(buildBottomBar());
+    m_bottomBar = buildBottomBar();
+    rootLayout->addWidget(m_bottomBar);
     setCentralWidget(root);
+    setDockNestingEnabled(true);
 
     m_console = new ConsoleDock(this);
+    m_console->setObjectName("ConsoleDock");
     addDockWidget(Qt::BottomDockWidgetArea, m_console);
     m_console->hide();
     connect(m_console, &ConsoleDock::commandEntered, this, &MainWindow::runConsoleCommand);
+    buildTimelineEditor();
+    buildNotesPanel();
+    buildMotionGraph();
     buildMenus();
 
     connect(&m_media, &MediaLibrary::frameReady, this, &MainWindow::onFrameReady);
@@ -243,6 +264,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_view, &Viewport::trackSelected, this, [this](const QString& id) {
         m_selectedTrackId = id;
         refreshAnnotations();
+        refreshMotionGraph();
     });
     connect(m_view, &Viewport::filesDropped, this, &MainWindow::openPaths);
     connect(m_view, &Viewport::scrubBy, this, &MainWindow::scrubRelative);
@@ -251,6 +273,8 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_view, &Viewport::activeSideChanged, this, [this] {
         m_selectedTrackId.clear();  // tracks belong to one clip
         refreshAnnotations();
+        refreshMotionGraph();
+        if (m_notesDock && m_notesDock->isVisible()) syncNoteEditor();
     });
     connect(m_timeline, &Timeline::contextMenuAt, this, [this](qint64 f, QPoint g) { showTimelineMenu(f, g); });
     connect(m_clipBar, &ClipBar::contextMenuAt, this, [this](qint64 local, QPoint g) {
@@ -273,10 +297,13 @@ MainWindow::MainWindow(QWidget* parent)
             FrameServer* srv = m_media.server(s.sourceId);
             if (!srv) continue;
             const QBitArray part = srv->cachedMask();
-            for (qsizetype i = 0; i < part.size() && i < s.count; ++i)
-                if (part.testBit(i)) mask.setBit(qsizetype(s.start + i));
+            for (qsizetype i = 0; i < s.count; ++i) {
+                const int64_t f = s.sourceFrame(i);
+                if (f >= 0 && f < part.size() && part.testBit(qsizetype(f))) mask.setBit(qsizetype(s.start + i));
+            }
         }
         m_timeline->setCacheMask(mask);
+        if (m_editor && m_editorDock && m_editorDock->isVisible() && m_soloId.isEmpty()) m_editor->setCacheMask(mask);
         if (m_playing) m_timeline->setRates(viewFps(), m_measuredFps);
     });
     m_cacheTimer.start();
@@ -286,9 +313,22 @@ MainWindow::MainWindow(QWidget* parent)
 
     m_continueDrawing = settings.value("continueDrawing", false).toBool();
     m_onion = settings.value("onion/on", false).toBool();
-    m_onionBefore = std::clamp(settings.value("onion/before", 2).toInt(), 0, 6);
-    m_onionAfter = std::clamp(settings.value("onion/after", 1).toInt(), 0, 6);
-    m_onionVideo = std::clamp(settings.value("onion/video", 0).toInt(), 0, 3);
+    m_onionMode = std::clamp(settings.value("onion/mode", 0).toInt(), 0, 1);
+    m_onionBefore = std::clamp(settings.value("onion/before", 2).toInt(), 0, 8);
+    m_onionAfter = std::clamp(settings.value("onion/after", 1).toInt(), 0, 8);
+    {
+        // 0.0.1 had one "video frames" count for both directions.
+        const int legacy = std::clamp(settings.value("onion/video", 0).toInt(), 0, 8);
+        m_onionVideoBefore = std::clamp(settings.value("onion/videoBefore", legacy).toInt(), 0, 8);
+        m_onionVideoAfter = std::clamp(settings.value("onion/videoAfter", legacy).toInt(), 0, 8);
+    }
+    m_onionStep = std::clamp(settings.value("onion/step", 1).toInt(), 1, 12);
+    m_onionOpacity = std::clamp(settings.value("onion/opacity", 0.45).toDouble(), 0.05, 0.9);
+    m_onionTint = settings.value("onion/tint", true).toBool();
+    m_onionWhilePlaying = settings.value("onion/whilePlaying", false).toBool();
+    if (const QColor c(settings.value("onion/beforeColor").toString()); c.isValid()) m_onionBeforeColor = c;
+    if (const QColor c(settings.value("onion/afterColor").toString()); c.isValid()) m_onionAfterColor = c;
+    populateOnionMenu();
     m_textSize = settings.value("textSize", 36.0).toDouble();
     m_brushOpacity = settings.value("brushOpacity", 1.0).toDouble();
     m_view->setTextSize(m_textSize);
@@ -302,24 +342,39 @@ MainWindow::MainWindow(QWidget* parent)
     setBrushSize(settings.value("brushSize", 3.0).toDouble());
     m_view->setPlaceholder(L("Drop media or start File > New Project", "미디어를 놓거나 파일 > 새 프로젝트로 시작하세요"));
     resize(1600, 940);
+    m_defaultState = saveState(kLayoutVersion);  // every dock hidden: Window > Reset Layout
     restoreGeometry(settings.value("geometry").toByteArray());
+    restoreLayout();
     refreshProjectTree();
     refreshClipList();
     refreshProperties();
     updateTitle();
     updateReadout();
+    updateHud();
+
+    // Built-in MCP endpoint for AI assistants (local named pipe, this Windows user only).
+    m_mcp = new McpServer(this);
+    if (settings.value("ai/mcpEnabled", true).toBool()) m_mcp->start();
+    if (m_mcpAction) m_mcpAction->setChecked(m_mcp->isListening());
 }
 
 MainWindow::~MainWindow()
 {
+    if (m_mcp) m_mcp->stop();
+    *m_audioCancel = true;  // long soundtrack decodes stop instead of holding up the exit
     if (m_trackJob) m_trackJob->cancel = true;
     if (m_trackThread) {
         m_trackThread->wait();
         delete m_trackThread;
     }
     m_playTimer.stop();
+    m_shuttleTimer.stop();
     m_audio.stop();
     for (QThread* t : m_audioThreads) {
+        t->wait();
+        delete t;
+    }
+    for (QThread* t : m_plateThreads) {
         t->wait();
         delete t;
     }
@@ -380,6 +435,9 @@ QWidget* MainWindow::buildProjectPanel()
     m_tree->setFocusPolicy(Qt::NoFocus);
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     m_tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_tree->setDragEnabled(true);
+    m_tree->setDragDropMode(QAbstractItemView::DragDrop); // file imports are handled by eventFilter
+    m_tree->setDefaultDropAction(Qt::CopyAction);
     connect(m_tree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item) {
         const QString kind = item->data(0, RoleKind).toString();
         if (kind == "source") setSolo(item->data(0, RoleId).toString());
@@ -439,16 +497,10 @@ QWidget* MainWindow::buildProjectPanel()
     connect(imp, &QToolButton::clicked, this, &MainWindow::importDialog);
     auto* addTl = iconButton("timeline-add", L("Add to Timeline", "타임라인에 추가"), 26, 16);
     connect(addTl, &QToolButton::clicked, this, [this] {
-        bool added = false;
+        QStringList ids;
         for (QTreeWidgetItem* it : m_tree->selectedItems())
-            if (it->data(0, RoleKind).toString() == "source") {
-                m_project.timeline.sourceIds << it->data(0, RoleId).toString();
-                added = true;
-            }
-        if (!added) return;
-        setDirty(true);
-        rebuildSequence();
-        refreshClipList();
+            if (it->data(0, RoleKind).toString() == "source") ids << it->data(0, RoleId).toString();
+        if (!ids.isEmpty()) insertSources(ids, -1);
     });
     auto* cmp = iconButton("compare", L("Compare as B", "B로 비교"), 26, 16);
     connect(cmp, &QToolButton::clicked, this, [this] {
@@ -484,7 +536,8 @@ QWidget* MainWindow::buildTimelinePanel()
     m_tabs = new QTabWidget;
     m_tabs->setDocumentMode(true);
     m_clipList = new QListWidget;
-    m_clipList->setDragDropMode(QAbstractItemView::InternalMove);
+    // Also allow copying a source out to the timeline canvas. Same-list drops still move.
+    m_clipList->setDragDropMode(QAbstractItemView::DragDrop);
     m_clipList->setDefaultDropAction(Qt::MoveAction);
     m_clipList->setFocusPolicy(Qt::NoFocus);
     m_clipList->setIconSize(QSize(16, 16));
@@ -494,23 +547,31 @@ QWidget* MainWindow::buildTimelinePanel()
     m_clipList->setResizeMode(QListView::Adjust);  // re-layout rows to the new width
     connect(m_clipList->model(), &QAbstractItemModel::rowsMoved, this, [this] {
         if (m_fillingClipList) return;
-        QStringList ids;
-        for (int i = 0; i < m_clipList->count(); ++i) ids << m_clipList->item(i)->data(RoleId).toString();
-        m_project.timeline.sourceIds = ids;
-        setDirty(true);
-        rebuildSequence();
+        QStringList order;
+        for (int i = 0; i < m_clipList->count(); ++i) order << m_clipList->item(i)->data(RoleClip).toString();
+        // Deferred: the list is still inside its own drop handling here. The new order packs the
+        // clips of V1 back to back (clips on other tracks keep their place).
+        QTimer::singleShot(0, this, [this, order] {
+            QStringList v1;
+            for (const QString& uid : order)
+                if (const TimelineClip* c = m_project.timeline.clip(uid); c && c->track == 0) v1 << uid;
+            editTimeline([&](TimelineDoc& doc) { return tl::reorderTrack(doc, v1, lengthFn()); }, L("Reorder Clips", "클립 순서"));
+        });
     });
     connect(m_clipList, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
         if (!m_soloId.isEmpty()) setSolo(QString());
-        const int row = m_clipList->row(item);
-        if (row >= 0 && row < m_seq.segments.size()) goToFrame(m_seq.segments[row].start);
+        if (const TimelineClip* c = m_project.timeline.clip(item->data(RoleClip).toString())) goToFrame(tl::span(*c, lengthFn()).start);
+        if (m_editor) {
+            m_editor->setSelectedClip(item->data(RoleClip).toString());
+            if (m_editorDock && m_editorDock->isVisible()) m_editor->setFocus(Qt::MouseFocusReason);
+        }
     });
     m_clipList->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_clipList, &QListWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
         QListWidgetItem* item = m_clipList->itemAt(pos);
         QMenu menu(this);
         if (item)
-            addSourceActions(menu, item->data(RoleId).toString(), m_clipList->row(item));
+            addSourceActions(menu, item->data(RoleId).toString(), m_clipList->row(item), item->data(RoleClip).toString());
         else
             menu.addAction(Icons::icon("import"), L("Import Media...", "미디어 가져오기..."), this, &MainWindow::importDialog);
         menu.addSeparator();
@@ -533,14 +594,12 @@ QWidget* MainWindow::buildTimelinePanel()
     f->setContentsMargins(6, 3, 6, 3);
     f->setSpacing(2);
     auto move = [this](int delta) {
-        const int row = m_clipList->currentRow();
-        QStringList& ids = m_project.timeline.sourceIds;
-        if (row < 0 || row + delta < 0 || row + delta >= ids.size()) return;
-        ids.swapItemsAt(row, row + delta);
-        setDirty(true);
-        rebuildSequence();
-        refreshClipList();
-        m_clipList->setCurrentRow(row + delta);
+        QListWidgetItem* item = m_clipList->currentItem();
+        if (!item) return;
+        const QString uid = item->data(RoleClip).toString();
+        if (editTimeline([&](TimelineDoc& doc) { return tl::swapNeighbour(doc, uid, delta, lengthFn()); }, L("Reorder Clips", "클립 순서")))
+            for (int i = 0; i < m_clipList->count(); ++i)
+                if (m_clipList->item(i)->data(RoleClip).toString() == uid) m_clipList->setCurrentRow(i);
     };
     auto* up = iconButton("up", L("Move Up", "위로"), 26, 16);
     auto* down = iconButton("down", L("Move Down", "아래로"), 26, 16);
@@ -548,24 +607,25 @@ QWidget* MainWindow::buildTimelinePanel()
     connect(down, &QToolButton::clicked, this, [move] { move(1); });
     auto* sort = iconButton("sort", L("Sort by Name", "이름순 정렬"), 26, 16);
     connect(sort, &QToolButton::clicked, this, [this] {
-        QStringList& ids = m_project.timeline.sourceIds;
         QCollator col;
         col.setNumericMode(true);
-        std::sort(ids.begin(), ids.end(), [&](const QString& a, const QString& b) {
-            return col.compare(m_project.find(a)->displayName(), m_project.find(b)->displayName()) < 0;
+        auto nameOf = [this](const QString& uid) {
+            const TimelineClip* c = m_project.timeline.clip(uid);
+            const Source* s = c ? m_project.find(c->sourceId) : nullptr;
+            return s ? s->displayName() : QString();
+        };
+        QStringList v1;
+        for (const QString& uid : videoClipOrder())
+            if (const TimelineClip* c = m_project.timeline.clip(uid); c && c->track == 0) v1 << uid;
+        std::stable_sort(v1.begin(), v1.end(), [&](const QString& a, const QString& b) {
+            const int byName = col.compare(nameOf(a), nameOf(b));
+            return byName != 0 ? byName < 0 : m_project.timeline.clip(a)->in < m_project.timeline.clip(b)->in;
         });
-        setDirty(true);
-        rebuildSequence();
-        refreshClipList();
+        editTimeline([&](TimelineDoc& doc) { return tl::reorderTrack(doc, v1, lengthFn()); }, L("Sort by Name", "이름순 정렬"));
     });
     auto* remove = iconButton("trash", L("Remove from Timeline", "타임라인에서 빼기"), 26, 16);
     connect(remove, &QToolButton::clicked, this, [this] {
-        const int row = m_clipList->currentRow();
-        if (row < 0 || row >= m_project.timeline.sourceIds.size()) return;
-        m_project.timeline.sourceIds.removeAt(row);
-        setDirty(true);
-        rebuildSequence();
-        refreshClipList();
+        if (QListWidgetItem* item = m_clipList->currentItem()) removeClip(item->data(RoleClip).toString());
     });
     auto* folder = iconButton("folder", L("Import Folder (right-click: New Folder)", "폴더 가져오기 (우클릭: 새 폴더)"), 26, 16);
     folder->setObjectName("SourcesFolderButton");
@@ -681,36 +741,13 @@ QWidget* MainWindow::buildToolStrip()
     m_onionBtn = iconButton("onion", L("Onion Skin  Shift+O", "어니언 스킨  Shift+O"), 32, 18);
     m_onionBtn->setCheckable(true);
     connect(m_onionBtn, &QToolButton::clicked, this, [this](bool on) { setOnion(on); });
-    auto* onionMenu = new QMenu(m_onionBtn);
-    m_onionMenu = onionMenu;
+    m_onionMenu = new QMenu(m_onionBtn);
+    m_onionMenu->setObjectName("OnionMenu");
     m_onionBtn->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_onionBtn, &QToolButton::customContextMenuRequested, this, [this] {
         m_onionMenu->exec(m_onionBtn->mapToGlobal(QPoint(m_onionBtn->width() + 4, 0)));
     });
-    auto addSpin = [&](const QString& label, int min, int max, int* target, const char* key) {
-        auto* w = new QWidget;
-        auto* h = new QHBoxLayout(w);
-        h->setContentsMargins(12, 4, 12, 4);
-        auto* l = new QLabel(label);
-        l->setObjectName("FormKey");
-        auto* spin = new QSpinBox;
-        spin->setRange(min, max);
-        spin->setValue(*target);
-        spin->setFixedWidth(64);
-        h->addWidget(l, 1);
-        h->addWidget(spin);
-        connect(spin, &QSpinBox::valueChanged, this, [this, target, key](int v) {
-            *target = v;
-            QSettings().setValue(key, v);
-            refreshAnnotations();
-        });
-        auto* act = new QWidgetAction(onionMenu);
-        act->setDefaultWidget(w);
-        onionMenu->addAction(act);
-    };
-    addSpin(L("Previous Keys", "이전 키"), 0, 6, &m_onionBefore, "onion/before");
-    addSpin(L("Next Keys", "다음 키"), 0, 6, &m_onionAfter, "onion/after");
-    addSpin(L("Video Frames", "영상 프레임"), 0, 3, &m_onionVideo, "onion/video");
+    m_onionBtn->setToolTip(L("Onion Skin  Shift+O · right-click: settings", "어니언 스킨  Shift+O · 우클릭: 설정"));
     v->addWidget(m_onionBtn);
     v->addSpacing(6);
 
@@ -832,21 +869,32 @@ QWidget* MainWindow::buildBottomBar()
     return bar;
 }
 
+QAction* MainWindow::addCommand(QMenu* menu, const QString& text, const QKeySequence& key, std::function<void()> slot)
+{
+    QAction* a = menu ? menu->addAction(text) : new QAction(text, this);
+    const QString defaultKey = key.toString(QKeySequence::PortableText);
+    QString id = !defaultKey.isEmpty() ? defaultKey : QStringLiteral("command-%1").arg(m_hotkeys.size());
+    if (m_hotkeys.contains(id)) {
+        // Two commands must never share one default key; keep the first binding.
+        qWarning().noquote() << "Shortcut" << defaultKey << "is already used by" << m_hotkeys[id]->text();
+        id = QStringLiteral("command-%1").arg(m_hotkeys.size());
+    }
+    a->setObjectName("command/" + id);
+    a->setProperty("defaultShortcut", id.startsWith(QLatin1String("command-")) ? QString() : defaultKey);
+    a->setProperty("commandLabel", text.isEmpty() ? L("Alternate: %1", "보조: %1").arg(defaultKey) : text);
+    a->setProperty("commandMenu", menu ? menu->title() : QString());
+    HotkeyManager::assign(a, QKeySequence(QSettings().value("hotkeys/" + id, a->property("defaultShortcut").toString()).toString(), QKeySequence::PortableText));
+    m_hotkeys[id] = a;
+    a->setShortcutContext(Qt::WindowShortcut);
+    addAction(a);
+    connect(a, &QAction::triggered, this, [slot = std::move(slot)] { slot(); });
+    return a;
+}
+
 void MainWindow::buildMenus()
 {
     auto add = [this](QMenu* menu, const QString& text, const QKeySequence& key, auto slot) {
-        QAction* a = menu ? menu->addAction(text) : new QAction(text, this);
-        const QString defaultKey = key.toString(QKeySequence::PortableText);
-        const QString id = !defaultKey.isEmpty() ? defaultKey : QStringLiteral("command-%1").arg(m_hotkeys.size());
-        a->setObjectName("command/" + id);
-        a->setProperty("defaultShortcut", defaultKey);
-        a->setProperty("commandLabel", text.isEmpty() ? L("Alternate: %1", "보조: %1").arg(defaultKey) : text);
-        HotkeyManager::assign(a, QKeySequence(QSettings().value("hotkeys/" + id, defaultKey).toString(), QKeySequence::PortableText));
-        m_hotkeys[id] = a;
-        a->setShortcutContext(Qt::WindowShortcut);
-        addAction(a);
-        connect(a, &QAction::triggered, this, slot);
-        return a;
+        return addCommand(menu, text, key, std::function<void()>(slot));
     };
 
     QMenu* file = menuBar()->addMenu(L("File", "파일"));
@@ -891,7 +939,18 @@ void MainWindow::buildMenus()
         }
     });
     edit->addSeparator();
-    add(edit, L("Clear Frame", "현재 프레임 비우기"), QKeySequence(Qt::SHIFT | Qt::Key_Delete), [this] { clearCurrentFrame(); });
+    add(edit, L("Split Clips at Playhead", "재생 위치에서 클립 자르기"), QKeySequence(Qt::CTRL | Qt::Key_B), [this] { splitAtPlayhead(); });
+    add(edit, L("Add / Edit Frame Note...", "프레임 메모 추가 / 편집..."), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_N), [this] {
+        m_notesDock->show();
+        m_notesDock->raise();
+        syncNoteEditor();
+        m_noteEdit->setFocus();
+    });
+    edit->addSeparator();
+    add(edit, L("Clear Frame", "현재 프레임 비우기"), QKeySequence(Qt::SHIFT | Qt::Key_Delete), [this] {
+        if (timelineHasFocus()) m_editor->deleteSelection(!m_editor->ripple());
+        else clearCurrentFrame();
+    });
     add(edit, L("Clear Clip Annotations", "클립 주석 모두 삭제"), QKeySequence(), [this] { clearAllInClip(); });
     edit->addSeparator();
     QAction* cont = edit->addAction(L("Continue Previous Drawing", "이전 주석에 이어 그리기"));
@@ -918,22 +977,28 @@ void MainWindow::buildMenus()
     QMenu* play = menuBar()->addMenu(L("Playback", "재생"));
     add(play, L("Play / Pause", "재생 / 정지"), QKeySequence(Qt::Key_Space), [this] { togglePlay(); });
     add(play, L("Stepped Playback (Bookmarks Only)", "단계 재생 (북마크만)"), QKeySequence(Qt::CTRL | Qt::Key_Space), [this] { togglePlay(true); });
+    QMenu* onNs = play->addMenu(Icons::icon("steps"), L("Play on 2s / 3s / 4s", "2s / 3s / 4s로 재생"));
+    add(onNs, L("Play on 2s", "2프레임씩 (2s)"), QKeySequence(Qt::ALT | Qt::Key_2), [this] { playOnNs(2); });
+    add(onNs, L("Play on 3s", "3프레임씩 (3s)"), QKeySequence(Qt::ALT | Qt::Key_3), [this] { playOnNs(3); });
+    add(onNs, L("Play on 4s", "4프레임씩 (4s)"), QKeySequence(Qt::ALT | Qt::Key_4), [this] { playOnNs(4); });
+    QMenu* speed = play->addMenu(L("Playback Speed", "재생 속도"));
+    for (double factor : { 0.25, 0.5, 1.0, 1.5, 2.0 }) {
+        speed->addAction(QStringLiteral("%1×").arg(factor), this, [this, factor] {
+            const MediaInfo* info = currentInfo();
+            const double native = info ? info->fps : viewFps();
+            setViewFps(std::clamp(native * factor, 1.0, 240.0));
+            showToast(L("Playback %1× · %2 fps", "재생 %1배 · %2 fps").arg(factor).arg(viewFps(), 0, 'f', 2));
+        });
+    }
     add(play, L("Next Frame", "다음 프레임"), QKeySequence(Qt::Key_Right), [this] { step(1); });
     add(play, L("Previous Frame", "이전 프레임"), QKeySequence(Qt::Key_Left), [this] { step(-1); });
     add(play, L("Forward 10 Frames", "10프레임 앞으로"), QKeySequence(Qt::SHIFT | Qt::Key_Right), [this] { step(10); });
     add(play, L("Back 10 Frames", "10프레임 뒤로"), QKeySequence(Qt::SHIFT | Qt::Key_Left), [this] { step(-10); });
     add(play, L("First Frame", "처음으로"), QKeySequence(Qt::Key_Home), [this] { stopPlayback(); goToFrame(playRange().first); });
     add(play, L("Last Frame", "끝으로"), QKeySequence(Qt::Key_End), [this] { stopPlayback(); goToFrame(playRange().second); });
-    add(play, L("Next Clip", "다음 클립"), QKeySequence(Qt::Key_Down), [this] {
-        const int i = m_seq.indexAt(m_current);
-        if (i + 1 < m_seq.segments.size()) goToFrame(m_seq.segments[i + 1].start);
-    });
-    add(play, L("Previous Clip", "이전 클립"), QKeySequence(Qt::Key_Up), [this] {
-        const int i = m_seq.indexAt(m_current);
-        if (i < 0) return;
-        const int64_t start = m_seq.segments[i].start;
-        goToFrame(m_current > start || i == 0 ? start : m_seq.segments[i - 1].start);
-    });
+    // 1.1: edit points of every visible track (clip starts and ends), like an editing program.
+    add(play, L("Next Clip / Edit", "다음 클립 / 편집점"), QKeySequence(Qt::Key_Down), [this] { jumpEditPoint(1); });
+    add(play, L("Previous Clip / Edit", "이전 클립 / 편집점"), QKeySequence(Qt::Key_Up), [this] { jumpEditPoint(-1); });
     play->addSeparator();
     add(play, L("Set In", "In 지점"), QKeySequence(Qt::Key_I), [this] { setLoopIn(); });
     add(play, L("Set Out", "Out 지점"), QKeySequence(Qt::Key_O), [this] { setLoopOut(); });
@@ -953,6 +1018,7 @@ void MainWindow::buildMenus()
         if (ok) setViewFps(fps);
     });
 
+    buildTimelineMenu();
     QMenu* audio = menuBar()->addMenu(L("Audio", "오디오"));
     {
         QSettings s;
@@ -1030,8 +1096,24 @@ void MainWindow::buildMenus()
     connect(showNotes, &QAction::toggled, m_view, &Viewport::setShowAnnotations);
     add(video, L("Onion Skin", "어니언 스킨"), QKeySequence(Qt::SHIFT | Qt::Key_O), [this] { setOnion(!m_onion); });
     video->addAction(L("Onion Skin Settings...", "어니언 스킨 설정..."), this, [this] {
-        m_onionMenu->exec(m_onionBtn->mapToGlobal(QPoint(m_onionBtn->width() + 4, 0)));
+        m_onionMenu->exec(m_onionBtn->isVisible() ? m_onionBtn->mapToGlobal(QPoint(m_onionBtn->width() + 4, 0))
+                                                  : m_view->mapToGlobal(QPoint(40, 40)));
     });
+    video->addSeparator();
+    m_flipAction = add(video, L("Mirror (Flip Horizontal)", "좌우 반전 (미러)"), QKeySequence(Qt::SHIFT | Qt::Key_F), [this] {
+        setFlip(m_flipAction->isChecked());
+    });
+    m_flipAction->setCheckable(true);
+    m_flipAction->setIcon(Icons::icon("flip"));
+    m_hudAction = add(video, L("Frame Counter Overlay", "프레임 카운터 표시"), QKeySequence(Qt::SHIFT | Qt::Key_H), [this] {
+        m_view->setShowHud(m_hudAction->isChecked());
+        QSettings().setValue("view/hud", m_hudAction->isChecked());
+        updateHud();
+    });
+    m_hudAction->setCheckable(true);
+    m_hudAction->setIcon(Icons::icon("hud"));
+    m_hudAction->setChecked(QSettings().value("view/hud", false).toBool());
+    m_view->setShowHud(m_hudAction->isChecked());
     video->addSeparator();
     QMenu* cmp = video->addMenu(Icons::icon("compare"), L("Compare", "비교"));
     add(cmp, L("Off", "끄기"), QKeySequence(Qt::SHIFT | Qt::Key_0), [this] { setCompareMode(CompareMode::Off); });
@@ -1064,22 +1146,20 @@ void MainWindow::buildMenus()
         showToast(on ? L("B synced by time", "B를 시간으로 맞춤") : L("B synced by frame number", "B를 프레임 번호로 맞춤"));
     });
 
+    buildFilterMenu();
     QMenu* marks = menuBar()->addMenu(L("Bookmarks", "북마크"));
     add(marks, L("Toggle Bookmark", "북마크 추가 / 삭제"), QKeySequence(Qt::Key_K), [this] { toggleBookmark(); });
     add(marks, L("Next Bookmark", "다음 북마크"), QKeySequence(Qt::CTRL | Qt::Key_Right), [this] { jumpBookmark(1); });
     add(marks, L("Previous Bookmark", "이전 북마크"), QKeySequence(Qt::CTRL | Qt::Key_Left), [this] { jumpBookmark(-1); });
     add(marks, L("Next Annotated Frame", "다음 주석 프레임"), QKeySequence(Qt::Key_Period), [this] {
-        const Loc loc = locate(m_current);
-        if (!loc) return;
-        for (int f : loc.source->annotatedFrames())
-            if (f > loc.local) return goToFrame(loc.segment->start + f);
+        const QVector<qint64> frames = annotatedGlobals();
+        auto it = std::upper_bound(frames.begin(), frames.end(), m_current);
+        if (it != frames.end()) goToFrame(*it);
     });
     add(marks, L("Previous Annotated Frame", "이전 주석 프레임"), QKeySequence(Qt::Key_Comma), [this] {
-        const Loc loc = locate(m_current);
-        if (!loc) return;
-        const QVector<int> frames = loc.source->annotatedFrames();
-        for (auto it = frames.rbegin(); it != frames.rend(); ++it)
-            if (*it < loc.local) return goToFrame(loc.segment->start + *it);
+        const QVector<qint64> frames = annotatedGlobals();
+        auto it = std::lower_bound(frames.begin(), frames.end(), m_current);
+        if (it != frames.begin()) goToFrame(*std::prev(it));
     });
     marks->addSeparator();
     add(marks, L("Next Edit Key", "다음 편집 키"), QKeySequence(Qt::SHIFT | Qt::Key_Period), [this] { jumpReviewKey(1); });
@@ -1093,7 +1173,8 @@ void MainWindow::buildMenus()
             const Source* src = m_project.find(s.sourceId);
             if (!src) continue;
             for (int f : src->bookmarkFrames()) {
-                const int64_t g = s.start + f;
+                const int64_t g = Sequence::globalIn(s, f);
+                if (g < 0) continue;
                 listMenu->addAction(QStringLiteral("%1   %2").arg(g, 5).arg(src->displayName()), this, [this, g] { goToFrame(g); });
             }
         }
@@ -1214,6 +1295,45 @@ void MainWindow::buildMenus()
         });
     }
     toolsMenu->addSeparator();
+    m_hwAction = toolsMenu->addAction(L("Hardware Decoding (NVDEC)", "하드웨어 디코딩 (NVDEC)"));
+    m_hwAction->setCheckable(true);
+    m_hwAction->setChecked(VideoDecoder::hardwareDecodingEnabled());
+    m_hwAction->setToolTip(L("Decode H.264 / HEVC / AV1 / VP9 on an NVIDIA GPU; other files and GPUs use the CPU automatically.",
+                             "NVIDIA GPU에서 H.264 / HEVC / AV1 / VP9을 디코딩합니다. 그 외 파일과 GPU는 자동으로 CPU를 사용합니다."));
+    connect(m_hwAction, &QAction::toggled, this, [this](bool on) {
+        VideoDecoder::setHardwareDecodingEnabled(on);
+        QSettings().setValue("decode/hardware", on);
+        if (!m_project.sources.isEmpty() &&
+            QMessageBox::question(this, L("Hardware Decoding", "하드웨어 디코딩"),
+                                  L("Reopen the project's media now with the new setting?", "현재 프로젝트의 미디어를 새 설정으로 다시 열까요?")) == QMessageBox::Yes)
+            reloadMedia();
+    });
+    QMenu* ai = toolsMenu->addMenu(Icons::icon("ai"), L("AI Assistant (MCP)", "AI 어시스턴트 (MCP)"));
+    m_mcpAction = ai->addAction(L("Allow AI Assistants to Connect", "AI 어시스턴트 연결 허용"));
+    m_mcpAction->setCheckable(true);
+    connect(m_mcpAction, &QAction::toggled, this, [this](bool on) {
+        QSettings().setValue("ai/mcpEnabled", on);
+        if (!m_mcp) return;
+        if (on) m_mcp->start(); else m_mcp->stop();
+        m_mcpAction->setChecked(m_mcp->isListening());
+        showToast(m_mcp->isListening() ? L("MCP server on", "MCP 서버 켜짐") : L("MCP server off", "MCP 서버 꺼짐"));
+    });
+    ai->addAction(L("Copy Claude Code Setup Command", "Claude Code 연결 명령 복사"), this, [this] {
+        QApplication::clipboard()->setText(McpServer::claudeCodeCommand());
+        showToast(L("Copied · paste it in a terminal", "복사됨 · 터미널에 붙여 넣으세요"));
+    });
+    ai->addAction(L("Copy MCP Config (JSON)", "MCP 설정 복사 (JSON)"), this, [this] {
+        QApplication::clipboard()->setText(McpServer::configJson());
+        showToast(L("Copied MCP server config", "MCP 서버 설정을 복사했습니다"));
+    });
+    ai->addAction(L("About AI Integration...", "AI 연동 안내..."), this, [this] {
+        QMessageBox box(this);
+        box.setWindowTitle(L("AI Assistant (MCP)", "AI 어시스턴트 (MCP)"));
+        box.setTextFormat(Qt::RichText);
+        box.setText(McpServer::aboutHtml(m_mcp && m_mcp->isListening()));
+        box.exec();
+    });
+    toolsMenu->addSeparator();
     toolsMenu->addAction(L("Cache Memory...", "캐시 메모리..."), this, [this] { changeCacheBudget(); });
     toolsMenu->addAction(L("Clear Cache", "캐시 비우기"), this, [this] {
         m_media.clearCache();
@@ -1222,36 +1342,20 @@ void MainWindow::buildMenus()
         showToast(L("Cache cleared", "캐시를 비웠습니다"));
     });
 
+    buildWindowMenu();
+
     QMenu* help = menuBar()->addMenu(L("Help", "도움말"));
-    help->addAction(L("Shortcuts", "단축키"), this, [this] {
-        QMessageBox::information(this, L("Shortcuts", "단축키"),
-            L("Space  Play / Pause\n←  →  Step      Shift+←  →  10 frames\n↑  ↓  Previous / Next clip      Home  End  First / Last\n"
-              "K  Bookmark      Ctrl+←  →  Previous / Next bookmark      ,  .  Previous / Next annotated frame\n"
-              "I  O  In / Out      Ctrl+L  Loop      Alt+X  Clear In/Out\n\n"
-              "V Select   P Pencil   E Eraser   T Text   A Arrow   L Line   R Rectangle   C Ellipse   M Tracker\n"
-              "Ctrl+A Select all   Ctrl+C / Ctrl+V Copy / Paste   Delete Delete   Shift+Delete Clear frame\n"
-              "Shift+O Onion skin   Ctrl+T / Ctrl+Shift+T Track forward / backward   Esc Stop / Deselect\n\n"
-              "Alt+Drag  Scrub      Middle drag  Pan      Wheel  Zoom      F  Fit      Ctrl+1  100%\n"
-              "G  Grid      H  Annotations\n"
-              "Shift+1~4  Wipe / Side by side / Top-bottom / Blend      Shift+0  Compare off      Tab  Swap A/B\n"
-              "Ctrl+M  Mute      Ctrl+↑ ↓  Volume\n\n"
-              "Ctrl+I  Import      Ctrl+S  Save      Ctrl+E  Export",
-              "Space  재생 / 정지\n←  →  1프레임      Shift+←  →  10프레임\n↑  ↓  이전 / 다음 클립      Home  End  처음 / 끝\n"
-              "K  북마크      Ctrl+←  →  이전 / 다음 북마크      ,  .  이전 / 다음 주석 프레임\n"
-              "I  O  In / Out      Ctrl+L  반복      Alt+X  In/Out 지우기\n\n"
-              "V 선택   P 펜슬   E 지우개   T 텍스트   A 화살표   L 직선   R 사각형   C 원   M 트래커\n"
-              "Ctrl+A 모두 선택   Ctrl+C / Ctrl+V 복사 / 붙여넣기   Delete 삭제   Shift+Delete 현재 프레임 비우기\n"
-              "Shift+O 어니언 스킨   Ctrl+T / Ctrl+Shift+T 앞 / 뒤로 추적   Esc 멈춤 / 선택 해제\n\n"
-              "Alt+드래그  스크럽      가운데 드래그  화면 이동      휠  확대      F  맞추기      Ctrl+1  100%\n"
-              "G  그리드      H  주석 표시\n"
-              "Shift+1~4  와이프 / 좌우 / 위아래 / 겹쳐 보기      Shift+0  비교 끄기      Tab  A/B 바꾸기\n"
-              "Ctrl+M  소리 끄기      Ctrl+↑ ↓  볼륨\n\n"
-              "Ctrl+I  가져오기      Ctrl+S  저장      Ctrl+E  내보내기"));
-    });
-    help->addAction(L("About", "정보"), this, [this] {
+    add(help, L("Keyboard Shortcuts", "단축키"), QKeySequence(Qt::Key_F1), [this] { showShortcuts(); })->setIcon(Icons::icon("keyboard"));
+    help->addAction(Icons::icon("help"), L("User Guide (English)", "사용 설명서 (영문)"), this, [this] { openUserGuide(); });
+    help->addSeparator();
+    help->addAction(L("About CHARONOS", "CHARONOS 정보"), this, [this] {
+        const bool nvdec = VideoDecoder::hardwareAvailable();
         QMessageBox::about(this, QStringLiteral("CHARONOS"),
-            QStringLiteral("CHARONOS %1\nC++ · Qt %2 · FFmpeg · OpenGL")
-                .arg(QStringLiteral(FRAMEREVIEW_VERSION), QString::fromLatin1(qVersion())));
+            QStringLiteral("<b>CHARONOS %1</b><br>Reference review and analysis for animators.<br><br>"
+                           "C++ · Qt %2 · FFmpeg · OpenGL<br>Decoding: %3<br>Viewer: GPU Y'CbCr → RGB<br>AI: MCP server %4")
+                .arg(QStringLiteral(FRAMEREVIEW_VERSION), QString::fromLatin1(qVersion()),
+                     nvdec ? QStringLiteral("NVDEC + CPU") : QStringLiteral("CPU"),
+                     m_mcp && m_mcp->isListening() ? QStringLiteral("on") : QStringLiteral("off")));
     });
 }
 
@@ -1298,8 +1402,7 @@ void MainWindow::createCanvas(QString name, QSize size, int count, double fps)
     source.frameCount = count; source.fps = fps;
     if (!openServerFor(source)) return;
     m_project.sources.append(source);
-    if (m_project.timeline.sourceIds.isEmpty()) m_project.timeline.fps = source.fps;
-    m_project.timeline.sourceIds << source.id;
+    appendToTimeline({ source.id });
     refreshProjectTree(); refreshClipList(); setSolo(source.id);
     setDirty(true);
     showToast(L("2D animation ready · draw a new key on any frame", "2D 애니메이션 준비 완료 · 원하는 프레임에 새 키를 그리세요"));
@@ -1366,9 +1469,10 @@ void MainWindow::openPaths(const QStringList& paths)
     importPaths(paths);
 }
 
-void MainWindow::importPaths(const QStringList& paths)
+QStringList MainWindow::importPaths(const QStringList& paths, bool toTimeline)
 {
     QStringList images, videos;
+    const int firstNew = int(m_project.sources.size());
     for (const QString& p : paths) {
         if (QFileInfo(p).isDir()) {
             const QString folder = QFileInfo(p).fileName();
@@ -1386,10 +1490,10 @@ void MainWindow::importPaths(const QStringList& paths)
                     const QStringList sequence = ImageSequenceSource::expandSequence(file);
                     for (const QString& member : sequence) imported.insert(member);
                 }
-                importPaths({file});
+                importPaths({file}, toTimeline);
             }
             for (int i = before; i < m_project.sources.size(); ++i) m_project.sources[i].folder = folder;
-            for (const auto& dir : childDirs) importPaths({dir});
+            for (const auto& dir : childDirs) importPaths({dir}, toTimeline);
             setDirty(true); refreshProjectTree();
         } else (ImageSequenceSource::isImageFile(p) ? images : videos) << QFileInfo(p).absoluteFilePath();
     }
@@ -1399,16 +1503,18 @@ void MainWindow::importPaths(const QStringList& paths)
         MediaRef ref;
         ref.kind = MediaRef::Kind::Video;
         ref.path = v;
-        addSource(ref, 0, true);
+        addSource(ref, 0, toTimeline);
     }
     if (!images.isEmpty()) {
         MediaRef ref;
         ref.kind = MediaRef::Kind::ImageSequence;
         ref.frames = images.size() == 1 ? ImageSequenceSource::expandSequence(images.first())
                                         : ImageSequenceSource::naturalSorted(images);
-        addSource(ref, m_project.timeline.sourceIds.isEmpty() ? 24.0 : m_project.timeline.fps, true);
+        addSource(ref, m_project.timeline.clips.isEmpty() ? 24.0 : m_project.timeline.fps, toTimeline);
     }
-    if (m_project.sources.size() == before) return;
+    QStringList added;
+    for (int i = firstNew; i < m_project.sources.size(); ++i) added << m_project.sources[i].id;
+    if (m_project.sources.size() == before) return added;
 
     setDirty(true);
     refreshProjectTree();
@@ -1416,12 +1522,14 @@ void MainWindow::importPaths(const QStringList& paths)
     rebuildSequence();
     // jump to the first newly imported clip
     const QString first = m_project.sources[before].id;
+    if (!toTimeline) return added;
     if (m_soloId.isEmpty()) {
         const int64_t g = m_seq.globalFor(first, 0);
         if (g >= 0) goToFrame(g);
     } else {
         setSolo(first);
     }
+    return added;
 }
 
 bool MainWindow::addSource(MediaRef ref, double fps, bool toTimeline)
@@ -1433,15 +1541,13 @@ bool MainWindow::addSource(MediaRef ref, double fps, bool toTimeline)
     if (!openServerFor(s)) return false;
     if (fps <= 0) s.fps = m_media.server(s.id)->info().fps;
     m_project.sources.append(s);
-    if (toTimeline) {
-        if (m_project.timeline.sourceIds.isEmpty()) m_project.timeline.fps = s.fps;
-        m_project.timeline.sourceIds << s.id;
-    }
+    if (toTimeline) appendToTimeline({ s.id });
     return true;
 }
 
 bool MainWindow::openServerFor(Source& s)
 {
+    m_timingInfo.remove(s.id);
     QApplication::setOverrideCursor(Qt::WaitCursor);
     showToast(L("Analyzing: %1", "분석 중: %1").arg(QFileInfo(s.media.firstFile()).fileName()), 60000);
     QApplication::processEvents();
@@ -1482,12 +1588,19 @@ void MainWindow::removeSource(const QString& id)
                               L("%1 has annotations. Remove it from the project?", "%1에 주석이 있습니다. 프로젝트에서 제거할까요?").arg(s->displayName())) != QMessageBox::Yes)
         return;
     stopPlayback();
-    m_project.timeline.sourceIds.removeAll(id);
+    m_view->commitEdits();
+    if (m_pending) commitEdit();
+    m_project.timeline.clips.removeIf([&](const TimelineClip& c) { return c.sourceId == id; });
     m_project.sources.erase(std::remove_if(m_project.sources.begin(), m_project.sources.end(),
                                            [&](const Source& x) { return x.id == id; }),
                             m_project.sources.end());
     m_media.remove(id);
+    m_timingInfo.remove(id);
     m_audioClips.erase(id);
+    m_peaks.erase(id);
+    m_plates.remove(id);
+    m_otsu.remove(id);
+    invalidateMix();
     if (m_soloId == id) m_soloId.clear();
     if (m_compareId == id) setCompareMode(CompareMode::Off), m_compareId.clear();
     m_undo.erase(std::remove_if(m_undo.begin(), m_undo.end(), [&](const Edit& e) { return e.sourceId == id; }), m_undo.end());
@@ -1518,14 +1631,26 @@ bool MainWindow::loadProject(const QString& path)
         return false;
     }
     stopPlayback();
+    if (m_trackJob) m_trackJob->cancel = true;  // it belongs to the project being closed
     m_media.clear();
     m_audioClips.clear();
+    m_timingInfo.clear();
+    m_peaks.clear();
+    m_plates.clear();
+    m_otsu.clear();
+    m_layersKey.clear();
     m_undo.clear();
     m_redo.clear();
     m_soloId.clear();
     m_compareId.clear();
     setCompareMode(CompareMode::Off);
     m_project = p;
+    m_noteSource.clear();
+    m_noteFrame = -1;
+    m_noteDirty = false;
+    m_graphSignature.clear();
+    m_onionVideoFrames.clear();
+    if (m_editor) m_editor->clearThumbnails();
 
     bool relinked = false;
     for (Source& s : m_project.sources) {
@@ -1551,6 +1676,11 @@ bool MainWindow::loadProject(const QString& path)
         }
         if (s.media.exists()) openServerFor(s);
     }
+    // 1.0 files: clips back to back on V1, their sound becomes linked clips on A1.
+    tl::normalize(m_project.timeline, lengthFn());
+    if (m_project.timeline.linkAudioOnOpen) linkLegacyAudio();
+    ++m_annotationRev;
+    invalidateMix();
 
     const bool legacy = QFileInfo(path).suffix().toLower() != Project::kExtension;
     m_projectPath = legacy ? QString() : path;
@@ -1560,6 +1690,9 @@ bool MainWindow::loadProject(const QString& path)
     rebuildSequence();
     goToFrame(0);
     setDirty(legacy || relinked);
+    refreshNotes();
+    syncNoteEditor();
+    refreshMotionGraph();
     showToast(L("Opened: %1", "열림: %1").arg(QFileInfo(path).fileName()));
     return true;
 }
@@ -1567,6 +1700,7 @@ bool MainWindow::loadProject(const QString& path)
 bool MainWindow::saveProject(bool saveAs)
 {
     m_view->commitEdits();
+    commitNoteEditor();
     if (m_pending) commitEdit();
     if (m_project.sources.isEmpty()) return false;
     QString path = m_projectPath;
@@ -1595,6 +1729,7 @@ bool MainWindow::saveProject(bool saveAs)
 bool MainWindow::maybeSave()
 {
     m_view->commitEdits();
+    commitNoteEditor();
     if (m_pending) commitEdit();
     if (!m_dirty || m_project.sources.isEmpty()) return true;
     const auto r = QMessageBox::question(this, L("Unsaved Changes", "저장하지 않은 변경 사항"),
@@ -1643,8 +1778,10 @@ void MainWindow::showNewProjectDialog(bool animation)
     if (dialog.exec() != QDialog::Accepted) return;
     if (!maybeSave()) return;
     stopPlayback();
+    if (m_trackJob) m_trackJob->cancel = true;
     m_media.clear();
     m_audioClips.clear();
+    m_timingInfo.clear();
     m_project = Project();
     m_project.timeline.name = name->text().trimmed().isEmpty() ? L("Untitled", "제목 없음") : name->text().trimmed();
     m_projectPath.clear();
@@ -1653,6 +1790,8 @@ void MainWindow::showNewProjectDialog(bool animation)
     m_pending.reset();
     m_shownKey.clear(); m_shownCompareKey.clear(); m_lastSourceId.clear();
     m_current = 0; m_selectedTrackId.clear(); m_compareAutoSolo = false;
+    m_noteSource.clear(); m_noteFrame = -1; m_noteDirty = false; m_graphSignature.clear(); m_onionVideoFrames.clear();
+    if (m_editor) m_editor->clearThumbnails();
     setCompareMode(CompareMode::Off);
     m_undo.clear();
     m_redo.clear();
@@ -1683,6 +1822,7 @@ void MainWindow::exportDialog()
     }
     r.fps = viewFps();
     r.comparing = m_compareMode != CompareMode::Off && m_media.server(m_compareId) && m_seq.segments.size() == 1;
+    if (m_filter.enabled()) r.filterName = AnalysisFilter::name(m_filter.mode);
     r.suggestedName = m_soloId.isEmpty()
                           ? (m_projectPath.isEmpty() ? QStringLiteral("timeline") : QFileInfo(m_projectPath).completeBaseName())
                           : QFileInfo(loc.source->displayName()).completeBaseName();
@@ -1704,6 +1844,44 @@ void MainWindow::exportDialog()
     job.trackRange = trailFrames();
     job.audio = dlg.audio();
     job.audioClips = m_audioClips;
+    if (dlg.filter()) {
+        job.filter = m_filter;
+        job.filterThreshold = effectiveThreshold();
+        for (auto it = m_plates.begin(); it != m_plates.end(); ++it)
+            if (it.value()) job.plates[it.key()] = it.value()->toImage();
+    }
+    if (m_soloId.isEmpty() && !dlg.comparison()) {
+        // The multi-track timeline as the viewer shows it: layers per frame, the sound mix.
+        job.timeline = true;
+        job.canvas = canvasSize();
+        job.timelineFps = std::max(1.0, m_project.timeline.fps);
+        job.mix = timelineMix();
+        job.layers.reserve(size_t(job.frameCount()));
+        for (int64_t g = job.first; g <= job.last; ++g) {
+            const Sequence::Segment* seg = m_seq.at(g);
+            std::vector<ExportJob::Layer> frame;
+            for (const PlacedLayer& p : visibleLayers(g)) {
+                ExportJob::Layer l;
+                l.sourceId = p.clip->sourceId;
+                l.local = p.local;
+                l.rect = p.rect;
+                l.opacity = p.clip->opacity;
+                l.blend = p.clip->blend;
+                l.primary = seg && p.clip->uid == seg->clipId;
+                frame.push_back(l);
+            }
+            job.layers.push_back(std::move(frame));
+        }
+        // Annotation lanes switched off stay out of the export too.
+        bool hidden = false;
+        for (const TrackState& t : m_project.timeline.noteTracks) hidden = hidden || !t.visible;
+        if (hidden)
+            for (const Source& s : m_project.sources) {
+                const QHash<QString, int> lanes = noteLanes(s);
+                for (auto it = lanes.begin(); it != lanes.end(); ++it)
+                    if (!m_project.timeline.noteTracks.value(it.value()).visible) job.hiddenNotes[s.id].insert(it.key());
+            }
+    }
     if (dlg.comparison()) {
         using Layout = ExportJob::Compare::Layout;
         auto& c = job.compare;
@@ -1729,7 +1907,15 @@ void MainWindow::exportDialog()
     std::atomic<bool> cancel{ false };
     QString error;
     bool ok = false;
-    QThread* worker = QThread::create([&] { ok = runExport(job, done, cancel, &error); });
+    QThread* worker = QThread::create([&] {
+        // An exception escaping a QThread ends the process; turn it into an export error instead.
+        try {
+            ok = runExport(job, done, cancel, &error);
+        } catch (const std::exception& e) {
+            ok = false;
+            error = L("Export stopped: %1 (try a smaller size or shorter range)", "내보내기 중단: %1 (크기나 범위를 줄여 보세요)").arg(QString::fromLocal8Bit(e.what()));
+        }
+    });
 
     QProgressDialog progress(L("Exporting...", "내보내는 중..."), L("Cancel", "취소"), 0, int(job.frameCount()), this);
     progress.setWindowTitle(L("Export", "내보내기"));
@@ -1786,11 +1972,18 @@ void MainWindow::exportCurrentFrame()
             local = notesFrame = compareFrameFor(loc.rawLocal);
         }
     }
-    FrameCache::Ptr frame = server->frame(local);
-    if (!frame) {
+    FrameCache::Ptr cached = server->frame(local);
+    if (!cached) {
         showToast(L("Decoding frame…", "프레임을 디코딩하는 중입니다"));
         return;
     }
+    // The cache keeps Y'CbCr planes; stills need RGB pixels.
+    const QImage still = cached->toImage();
+    if (still.isNull()) {
+        showToast(L("Can't convert this frame.", "이 프레임을 변환할 수 없습니다."));
+        return;
+    }
+    const QImage* frame = &still;
     FrameExportDialog dialog(*frame, *source, int(notesFrame), this, trailFrames());
     if (dialog.exec() != QDialog::Accepted) return;
     auto options = dialog.options(); options.trackRange = trailFrames();
@@ -1854,8 +2047,7 @@ void MainWindow::rebuildSequence()
         if (m_compareMode != CompareMode::Off) count = std::max(count, compareSpan());
         m_seq.append(m_soloId, count);
     } else {
-        for (const QString& id : m_project.timeline.sourceIds)
-            if (FrameServer* srv = m_media.server(id)) m_seq.append(id, srv->frameCount());
+        m_seq = timelineSequence();
     }
     m_timeline->setFrameCount(m_seq.total);
     QVector<qint64> starts;
@@ -1884,6 +2076,31 @@ void MainWindow::rebuildSequence()
     goToFrame(m_current);
     refreshProperties();
     updateTitle();
+    refreshTimelineEditor();
+}
+
+Sequence MainWindow::timelineSequence() const
+{
+    // The multi-track timeline as the viewer plays it: per frame the clip being edited (the top
+    // visible one), gaps where no picture is. Offline clips keep their time (shown as gaps).
+    return tl::primary(m_project.timeline, lengthFn(), onlineFn());
+}
+
+std::pair<int64_t, int64_t> MainWindow::segmentRange(const Sequence::Segment& s)
+{
+    return { s.sourceFrame(0), s.sourceFrame(s.count - 1) };
+}
+
+QVector<qint64> MainWindow::annotatedGlobals() const
+{
+    QVector<qint64> out;
+    for (const Sequence::Segment& s : m_seq.segments)
+        if (const Source* src = m_project.find(s.sourceId))
+            for (int f : src->annotatedFrames())
+                if (const int64_t g = Sequence::globalIn(s, f); g >= 0) out << g;
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
 }
 
 MainWindow::Loc MainWindow::locate(int64_t global)
@@ -1893,8 +2110,9 @@ MainWindow::Loc MainWindow::locate(int64_t global)
     if (!loc.segment) return loc;
     loc.source = m_project.find(loc.segment->sourceId);
     loc.server = m_media.server(loc.segment->sourceId);
-    loc.rawLocal = std::clamp<int64_t>(global - loc.segment->start, 0, loc.segment->count - 1);
-    loc.local = loc.server ? std::min<int64_t>(loc.rawLocal, loc.server->frameCount() - 1) : loc.rawLocal;
+    // rawLocal is the source frame (trim offset applied); compare mode may run past A's end.
+    loc.rawLocal = loc.segment->sourceFrame(std::clamp<int64_t>(global - loc.segment->start, 0, loc.segment->count - 1));
+    loc.local = loc.server ? std::clamp<int64_t>(loc.rawLocal, 0, std::max<int64_t>(0, loc.server->frameCount() - 1)) : loc.rawLocal;
     return loc;
 }
 
@@ -1956,29 +2174,49 @@ void MainWindow::goToFrame(int64_t global)
     }
     m_current = global;
     const Loc loc = locate(global);
-    if (!loc) return;
+    if (!loc) {
+        if (m_seq.at(global)) showGap(global);
+        return;
+    }
+    const bool onTimeline = m_soloId.isEmpty();
 
-    // Request this frame (and prefetch within the play range clipped to this clip).
+    // Request this frame (and prefetch within the play range clipped to this clip), in source frames.
     const auto [a, b] = playRange();
     const int64_t segEnd = loc.segment->start + loc.segment->count - 1;
-    const int64_t lo = std::max(a, loc.segment->start) - loc.segment->start;
-    const int64_t hi = std::min(b, segEnd) - loc.segment->start;
+    const int64_t lo = loc.segment->sourceFrame(std::max(a, loc.segment->start) - loc.segment->start);
+    const int64_t hi = loc.segment->sourceFrame(std::min(b, segEnd) - loc.segment->start);
     loc.server->request(loc.local, m_playing, lo, hi);
 
     QStringList active{ loc.source->id };
-    // Near the end of a clip during playback, warm up the next one.
+    // Near the end of a clip during playback, warm up the next one (gaps have no picture).
     const int idx = m_seq.indexAt(global);
-    if (m_playing && idx + 1 < m_seq.segments.size() && segEnd - global < int64_t(viewFps() * 2)) {
+    if (m_playing && idx + 1 < m_seq.segments.size() && !m_seq.segments[idx + 1].isGap() && segEnd - global < int64_t(viewFps() * 2)) {
         const Sequence::Segment& next = m_seq.segments[idx + 1];
         if (FrameServer* ns = m_media.server(next.sourceId)) {
-            ns->request(0, true, 0, std::min<int64_t>(next.count - 1, b - next.start));
+            if (next.sourceId != loc.source->id)  // the same source split in two keeps one request
+                ns->request(next.sourceFrame(0), true, next.sourceFrame(0), next.sourceFrame(std::min<int64_t>(next.count - 1, std::max<int64_t>(0, b - next.start))));
             active << next.sourceId;
         }
     }
     if (m_compareMode != CompareMode::Off) active << m_compareId;
+    if (onTimeline)
+        for (const QString& id : m_layerSources)
+            if (!active.contains(id)) active << id;
     m_media.setActive(active);
 
-    m_view->setMediaSize(QSize(loc.server->info().width, loc.server->info().height));
+    const QSize media(loc.server->info().width, loc.server->info().height);
+    if (onTimeline) {
+        // The canvas is the timeline's frame; the edited picture sits in it with its clip's transform.
+        const QSize canvas = canvasSize();
+        m_view->setMediaSize(canvas);
+        if (const TimelineClip* clip = m_project.timeline.clip(loc.segment->clipId))
+            m_view->setPrimaryPlacement(media, placementFor(*clip, media, canvas), float(clip->opacity), clip->blend);
+        else
+            m_view->setPrimaryPlacement({}, {});
+    } else {
+        m_view->setMediaSize(media);
+        m_view->setPrimaryPlacement({}, {});
+    }
     const QString key = loc.source->id + ':' + QString::number(loc.local);
     if (key != m_shownKey) {
         if (FrameCache::Ptr img = loc.server->frame(loc.local)) {
@@ -1986,18 +2224,30 @@ void MainWindow::goToFrame(int64_t global)
             m_shownKey = key;
         }
     }
+    if (onTimeline) {
+        updateLayers(loc);
+    } else if (m_view->layerCount() > 0) {
+        m_view->setLayers({}, {});
+        m_layersKey.clear();
+        m_layerSources.clear();
+    }
     updateCompareFrame(m_playing);
     refreshAnnotations();
+    refreshFilter();
     if (loc.source->id != m_lastSourceId) {  // moved onto another clip
         m_lastSourceId = loc.source->id;
         refreshProjectTree();
         m_clipList->viewport()->update();
         refreshProperties();
         updateTitle();
+        refreshMotionGraph();
     }
     m_timeline->setCurrent(global);
-    m_clipBar->setClip(loc.source->displayName(), loc.segment->count, loc.rawLocal, loc.segment->start);
+    m_clipBar->setClip(loc.source->displayName(), loc.segment->count, global - loc.segment->start, loc.segment->start, loc.segment->offset);
+    if (m_editor && m_editorDock && m_editorDock->isVisible()) m_editor->setCurrent(m_soloId.isEmpty() ? global : -1);
     updateReadout();
+    if (m_graph && m_graphDock && m_graphDock->isVisible()) m_graph->setCurrentFrame(int(loc.rawLocal));
+    if (m_notesDock && m_notesDock->isVisible()) syncNoteEditor();
 }
 
 void MainWindow::step(int delta)
@@ -2011,11 +2261,17 @@ QVector<qint64> MainWindow::playbackBookmarks() const
 {
     QVector<qint64> frames;
     const auto [first, last] = playRange();
+    if (m_stepEvery > 1) {
+        // "Play on Ns" holds every Nth frame of the play range (animation shot on twos / threes);
+        // steppedFrameFor() computes the held frame, this only marks the start.
+        frames.append(first);
+        return frames;
+    }
     for (const auto& seg : m_seq.segments)
         if (const Source* src = m_project.find(seg.sourceId))
             for (int f : src->bookmarkFrames()) {
-                const qint64 global = seg.start + f;
-                if (f >= 0 && f < seg.count && global >= first && global <= last) frames.append(global);
+                const qint64 global = Sequence::globalIn(seg, f);
+                if (global >= 0 && global >= first && global <= last) frames.append(global);
             }
     std::sort(frames.begin(), frames.end());
     frames.erase(std::unique(frames.begin(), frames.end()), frames.end());
@@ -2024,6 +2280,10 @@ QVector<qint64> MainWindow::playbackBookmarks() const
 
 int64_t MainWindow::steppedFrameFor(int64_t position) const
 {
+    if (m_stepEvery > 1) {
+        const int64_t first = playRange().first;
+        return first + ((std::max(first, position) - first) / m_stepEvery) * m_stepEvery;
+    }
     if (m_steppedFrames.isEmpty()) return position;
     auto it = std::upper_bound(m_steppedFrames.begin(), m_steppedFrames.end(), position);
     return it == m_steppedFrames.begin() ? m_steppedFrames.front() : *std::prev(it);
@@ -2032,19 +2292,25 @@ int64_t MainWindow::steppedFrameFor(int64_t position) const
 void MainWindow::togglePlay(bool stepped)
 {
     if (m_seq.total <= 0) return;
+    if (m_shuttleTimer.isActive()) {  // Space stops J / L shuttling
+        m_shuttleTimer.stop();
+        m_shuttle = 0;
+        return;
+    }
     if (m_playing) {
         stopPlayback();
         return;
     }
     const auto [a, b] = playRange();
     if (m_current < a || m_current >= b) goToFrame(a);
+    if (!stepped) m_stepEvery = 0;
     m_steppedFrames = stepped ? playbackBookmarks() : QVector<qint64>{};
     if (stepped && m_steppedFrames.isEmpty()) {
         showToast(L("Add a bookmark inside the playback range first (K).", "재생 범위 안에 북마크를 먼저 추가하세요 (K)."));
         return;
     }
     m_stepped = stepped;
-    m_timeline->setStepped(stepped);
+    m_timeline->setStepped(stepped, m_stepEvery > 1 ? L("On %1s", "%1프레임씩").arg(m_stepEvery) : QString());
     if (stepped) { m_audio.stop(); m_audioPlayingId.clear(); }
     m_playing = true;
     m_playTimer.setInterval(std::clamp(int(250.0 / viewFps()), 1, 8));
@@ -2063,7 +2329,10 @@ void MainWindow::stopPlayback()
 {
     const bool wasPlaying = m_playing;
     m_playing = false;
+    m_shuttle = 0;
+    m_shuttleTimer.stop();
     m_stepped = false;
+    m_stepEvery = 0;
     m_timeline->setStepped(false);
     m_playTimer.stop();
     m_audio.stop();
@@ -2078,6 +2347,7 @@ void MainWindow::stopPlayback()
 
 bool MainWindow::audioDrives()
 {
+    if (timelineAudio()) return m_audio.playingMix();
     if (!m_audio.isPlaying() || m_audioPlayingId.isEmpty()) return false;
     if (compareAudioFromB()) return m_audioPlayingId == m_compareId;
     const Loc loc = locate(m_current);
@@ -2098,14 +2368,18 @@ void MainWindow::countShownFrame()
 void MainWindow::onPlayTick()
 {
     if (!m_playing) return;
+    if (m_soloId.isEmpty() && !m_stepped) {
+        timelineTick();
+        return;
+    }
     const auto [a, b] = playRange();
     const Loc current = locate(m_current);
-    if (!current) { stopPlayback(); return; }
+    if (!current && !m_stepped) { stopPlayback(); return; }
     // At a loop/seek boundary the requested image may still be decoding. Do not
     // let the soundtrack run ahead while the old image is frozen on screen.
-    if (m_shownKey != current.source->id + ':' + QString::number(current.local)) {
+    if (current && m_shownKey != current.source->id + ':' + QString::number(current.local)) {
         m_audio.stop(); m_audioPlayingId.clear();
-        current.server->request(current.local, true, 0, current.segment->count - 1);
+        current.server->request(current.local, true, current.segment->sourceFrame(0), current.segment->sourceFrame(current.segment->count - 1));
         m_clock.restart(); m_nextDueNs = qint64(1e9 / viewFps());
         return;
     }
@@ -2113,7 +2387,7 @@ void MainWindow::onPlayTick()
     if (m_stepped) {
         const qint64 now = m_clock.nsecsElapsed();
         if (now < m_nextDueNs) return;
-        const auto frames = playbackBookmarks();
+        const auto frames = m_stepEvery > 1 ? m_steppedFrames : playbackBookmarks();
         if (frames.isEmpty()) { stopPlayback(); return; }
         m_steppedFrames = frames;
         const qint64 frameNs = qint64(1e9 / viewFps());
@@ -2123,8 +2397,8 @@ void MainWindow::onPlayTick()
         const qint64 position = first + ((std::max<qint64>(first, m_steppedPosition) - first + steps) % length);
         const qint64 shown = steppedFrameFor(position);
         const Loc target = locate(shown);
-        if (!target) return;
-        if (!target.server->isCached(target.local)) { target.server->request(target.local, true, 0, target.segment->count - 1); return; }
+        if (target && !target.server->isCached(target.local)) { target.server->request(target.local, true, target.segment->sourceFrame(0), target.segment->sourceFrame(target.segment->count - 1)); return; }
+        if (!target && !m_seq.at(shown)) return;
         if (shown != m_current) { goToFrame(shown); countShownFrame(); }
         m_steppedPosition = position;
         m_nextDueNs += steps * frameNs;
@@ -2153,7 +2427,9 @@ void MainWindow::onPlayTick()
             // Picture = what is being heard, minus the user's output-latency offset (Audio > Audio Offset).
             heardLocal = ai.frameAt(m_audio.position() - m_audioOffsetMs / 1000.0 * (viewFps() / nativeFps));
         }
-        const int64_t heard = loc.segment->start + heardLocal;
+        const int64_t heard = loc.segment->timing.timed()
+            ? loc.segment->start + int64_t(std::floor((ai.timeOf(heardLocal) - loc.segment->timeStart) * loc.segment->timing.fps + 1e-6))
+            : loc.segment->start + heardLocal - loc.segment->offset;
         const int64_t segEnd = loc.segment->start + loc.segment->count - 1;
         const int64_t limit = std::min(b, segEnd);
         if (heard > limit && (m_realtime || m_current >= limit)) {
@@ -2195,7 +2471,7 @@ void MainWindow::onPlayTick()
     const Loc loc = locate(next);
     if (!loc) return;
     if (!loc.server->isCached(loc.local)) {
-        loc.server->request(loc.local, true, 0, loc.segment->count - 1);
+        loc.server->request(loc.local, true, loc.segment->sourceFrame(0), loc.segment->sourceFrame(loc.segment->count - 1));
         return;
     }
     const bool wrapped = next < m_current;
@@ -2209,6 +2485,13 @@ void MainWindow::onPlayTick()
 void MainWindow::onFrameReady(const QString& id, qint64 index)
 {
     const Loc loc = locate(m_current);
+    // Other tracks' pictures (and A's previous frame for motion highlight) arrive here too.
+    if (loc && m_soloId.isEmpty() && (m_layerSources.contains(id) || (id == loc.source->id && m_layerExtra.contains(index)))) {
+        m_layersKey.clear();
+        updateLayers(loc);
+    }
+    if (loc && m_filter.mode == AnalysisFilter::Mode::MotionHighlight && id == loc.source->id && index == loc.local - 1) refreshFilter();
+    if (loc && m_filter.usesAutoThreshold() && id == loc.source->id && index == loc.local && !m_otsu.contains(id)) refreshFilter();
     if (loc && loc.source->id == id && loc.local == index) {
         const QString key = id + ':' + QString::number(index);
         if (key != m_shownKey)
@@ -2221,10 +2504,11 @@ void MainWindow::onFrameReady(const QString& id, qint64 index)
     }
     if (m_compareMode != CompareMode::Off && id == m_compareId && loc && index == compareFrameFor(loc.rawLocal))
         updateCompareFrame(m_playing);
-    if (m_onion && !m_playing && m_onionVideo > 0 && loc) {
-        const bool nearA = id == loc.source->id && std::abs(index - loc.local) <= m_onionVideo;
+    const int ghostReach = std::max(m_onionVideoBefore, m_onionVideoAfter) * std::max(1, m_onionStep);
+    if (m_onion && (!m_playing || m_onionWhilePlaying) && ghostReach > 0 && loc) {
+        const bool nearA = id == loc.source->id && std::abs(index - loc.local) <= ghostReach;
         const bool nearB = m_compareMode != CompareMode::Off && id == m_compareId &&
-                           std::abs(index - compareFrameFor(loc.rawLocal)) <= m_onionVideo;
+                           std::abs(index - compareFrameFor(loc.rawLocal)) <= ghostReach;
         if (nearA || nearB) refreshAnnotations();
     }
 }
@@ -2261,11 +2545,24 @@ void MainWindow::setViewFps(double fps)
     if (!m_soloId.isEmpty()) {
         if (Source* s = m_project.find(m_soloId)) s->fps = fps;
     } else {
-        m_project.timeline.fps = fps;
+        const double ratio = fps / std::max(1.0, m_project.timeline.fps);
+        m_current = std::llround(m_current * ratio);
+        m_project.timeline.loopIn = int(std::llround(m_project.timeline.loopIn * ratio));
+        m_project.timeline.loopOut = int(std::llround((m_project.timeline.loopOut + 1) * ratio)) - 1;
+        editTimeline([&](TimelineDoc& doc) {
+            for (TimelineClip& c : doc.clips) {
+                if (c.start >= 0) c.start = std::llround(c.start * ratio);
+                c.fadeIn = int(std::llround(c.fadeIn * ratio));
+                c.fadeOut = int(std::llround(c.fadeOut * ratio));
+            }
+            doc.fps = fps;
+            return true;
+        }, L("Timeline Frame Rate", "타임라인 프레임 레이트"));
     }
     setDirty(true);
     m_timeline->setRates(fps, 0);
     if (m_compareMode != CompareMode::Off && !m_soloId.isEmpty()) rebuildSequence();
+    invalidateMix();  // the mix is in timeline seconds
     if (m_playing) {
         m_playTimer.setInterval(std::clamp(int(250.0 / fps), 1, 8));
         m_clock.restart();
@@ -2412,31 +2709,92 @@ void MainWindow::refreshAnnotations()
     const int local = int(loc.rawLocal);
     for (const Source::Entry& e : loc.source->renderable(local)) items.append({ loc.source->evaluated(*e.annotation, local), e.inherited });
 
-    // Onion skin for one side: annotation keys before the one on screen (warm) and after (cool),
-    // plus neighbouring video frames while paused (straight from the cache).
-    auto onion = [&](const Source& src, FrameServer* srv, int at, int64_t count, int side) {
-        const QVector<int> keys = src.annotatedFrames();
-        const int shown = src.keyAt(at);
-        const double fade[] = { 0.42, 0.26, 0.16, 0.1, 0.07, 0.05 };
-        int n = 0;
-        for (auto it = keys.rbegin(); it != keys.rend() && n < m_onionBefore; ++it)
-            if (*it < (shown >= 0 ? shown : at + 1)) {
-                for (const Annotation& a : src.annotations.at(*it)) ghosts.append({ src.evaluated(a, *it), QColor(0xe0, 0x6c, 0x5a), fade[n], side });
-                ++n;
-            }
-        n = 0;
-        for (int k : keys)
-            if (k > at && n < m_onionAfter) {
-                for (const Annotation& a : src.annotations.at(k)) ghosts.append({ src.evaluated(a, k), QColor(0x5a, 0xa8, 0xe0), fade[n], side });
-                ++n;
-            }
-        if (!m_playing)
-            for (int d = 1; d <= m_onionVideo; ++d)
-                for (int f : { at - d, at + d })
-                    if (f >= 0 && f < count)
-                        if (FrameCache::Ptr img = srv->frame(f)) frameGhosts.append({ img, 0.28 / d, side });
+    // Onion skin for one side, the way 2D animation packages do it:
+    //  - drawings: the previous / next drawings (Keys mode) or whatever is drawn N frames away
+    //    (Frames mode, every `step` frames), tinted warm before and cool after;
+    //  - video: neighbouring frames before / after, every `step` frames (e.g. on twos), tinted
+    //    the same way. Opacity falls off with distance from the nearest ghost.
+    // Video ghosts are decoded on purpose (not just picked from the prefetch window).
+    const bool showGhosts = m_onion && (!m_playing || m_onionWhilePlaying);
+    auto falloff = [this](int n, int total) {
+        // nearest = m_onionOpacity, farthest ~ a quarter of it
+        if (total <= 1) return m_onionOpacity;
+        return m_onionOpacity * (1.0 - 0.75 * double(n) / double(total - 1));
     };
-    if (m_onion) onion(*loc.source, loc.server, local, loc.segment->count, 0);
+    QVector<int64_t> wantA, wantB;
+    // Annotation lanes switched off or locked in the timeline hide / freeze their clips.
+    if (m_soloId.isEmpty()) {
+        bool hidden = false, frozen = false;
+        for (const TrackState& t : m_project.timeline.noteTracks) {
+            hidden = hidden || !t.visible;
+            frozen = frozen || t.locked;
+        }
+        if (hidden || frozen) {
+            const QHash<QString, int> lanes = noteLanes(*loc.source);
+            QVector<Viewport::Item> kept;
+            for (Viewport::Item& it : items) {
+                const TrackState st = m_project.timeline.noteTracks.value(lanes.value(it.annotation.id, std::max(0, it.annotation.lane)));
+                if (!st.visible) continue;
+                if (st.locked) it.annotation.locked = true;
+                kept << it;
+            }
+            items = kept;
+        }
+    }
+    if (m_filter.mode == AnalysisFilter::Mode::MotionHighlight && local > 0) wantA << local - 1;
+    auto onion = [&](const Source& src, FrameServer* srv, int at, int64_t count, int side) {
+        const int step = std::max(1, m_onionStep);
+        const QColor before = m_onionTint ? m_onionBeforeColor : QColor();
+        const QColor after = m_onionTint ? m_onionAfterColor : QColor();
+        auto addDrawing = [&](int key, int evalFrame, const QColor& tint, double opacity) {
+            const auto it = src.annotations.find(key);
+            if (it == src.annotations.end()) return;
+            for (const Annotation& a : it->second)
+                ghosts.append({ src.evaluated(a, evalFrame), tint, opacity, side });  // invalid tint = own colour
+        };
+        const int shown = src.keyAt(at);
+        if (m_onionMode == 0) {
+            const QVector<int> keys = src.annotatedFrames();  // non-empty keys only
+            int n = 0;
+            for (auto it = keys.rbegin(); it != keys.rend() && n < m_onionBefore; ++it)
+                if (*it < (shown >= 0 ? shown : at + 1)) addDrawing(*it, *it, before, falloff(n++, m_onionBefore));
+            n = 0;
+            for (int k : keys)
+                if (k > at && n < m_onionAfter) addDrawing(k, k, after, falloff(n++, m_onionAfter));
+        } else {
+            // Frames mode: what is on screen d*step frames away, skipping the drawing already shown.
+            QSet<int> used{ shown };
+            for (int d = 1; d <= m_onionBefore; ++d) {
+                const int f = at - d * step;
+                const int key = f >= 0 ? src.keyAt(f) : -1;
+                if (key >= 0 && !used.contains(key) && !src.annotations.at(key).isEmpty()) {
+                    used.insert(key);
+                    addDrawing(key, f, before, falloff(d - 1, m_onionBefore));
+                }
+            }
+            for (int d = 1; d <= m_onionAfter; ++d) {
+                const int f = at + d * step;
+                const int key = f < count ? src.keyAt(f) : -1;
+                if (key >= 0 && !used.contains(key) && !src.annotations.at(key).isEmpty()) {
+                    used.insert(key);
+                    addDrawing(key, f, after, falloff(d - 1, m_onionAfter));
+                }
+            }
+        }
+        QVector<int64_t>& want = side == 0 ? wantA : wantB;
+        auto addFrame = [&](int64_t f, int n, int total, const QColor& tint) {
+            if (f < 0 || f >= count) return;
+            want << f;
+            if (FrameCache::Ptr img = srv->frame(f))
+                frameGhosts.append({ img, falloff(n, total) * 0.75, side, tint, tint.isValid() ? 0.55 : 0.0 });
+        };
+        // Nearest first: the viewer draws the list back to front so these end up on top.
+        for (int d = 1; d <= std::max(m_onionVideoBefore, m_onionVideoAfter); ++d) {
+            if (d <= m_onionVideoBefore) addFrame(int64_t(at) - int64_t(d) * step, d - 1, m_onionVideoBefore, before);
+            if (d <= m_onionVideoAfter) addFrame(int64_t(at) + int64_t(d) * step, d - 1, m_onionVideoAfter, after);
+        }
+    };
+    if (showGhosts) onion(*loc.source, loc.server, local, loc.server->frameCount(), 0);
 
     QVector<Viewport::Item> bItems;
     const Source* b = m_compareMode != CompareMode::Off ? m_project.find(m_compareId) : nullptr;
@@ -2445,8 +2803,14 @@ void MainWindow::refreshAnnotations()
     if (bs) {
         for (const Source::Entry& e : b->renderable(bLocal)) bItems.append({ b->evaluated(*e.annotation, bLocal), e.inherited });
         // B's video ghosts only where B has its own area (they would sit on A otherwise)
-        if (m_onion) onion(*b, bs, bLocal, bs->frameCount(), 1);
+        if (showGhosts) onion(*b, bs, bLocal, bs->frameCount(), 1);
     }
+    // Ask for ghost frames that aren't decoded yet (they arrive through onFrameReady).
+    if (wantA != m_onionVideoFrames) {
+        m_onionVideoFrames = wantA;
+        loc.server->requestExtra(wantA + m_layerExtra);
+    }
+    if (bs) bs->requestExtra(wantB);
     m_view->setAnnotations(std::move(items));
     m_view->setCompareAnnotations(std::move(bItems));
     m_view->setOnion(std::move(ghosts), std::move(frameGhosts));
@@ -2467,14 +2831,18 @@ void MainWindow::refreshMarks()
     for (const Sequence::Segment& s : m_seq.segments) {
         const Source* src = m_project.find(s.sourceId);
         if (!src) continue;
+        // Everything is keyed by source frame; a trimmed clip shows only its own part.
         for (int f : src->bookmarkFrames())
-            if (f < s.count) marks << s.start + f;
-        for (const auto& r : src->reviewRanges(s.count)) ranges.append({s.start + r.first, s.start + r.last});
+            if (const int64_t g = Sequence::globalIn(s, f); g >= 0) marks << g;
+        for (const auto& r : src->reviewRanges(s.sourceFrame(s.count - 1) + 1)) {
+            const qint64 first = std::max<qint64>(r.first, s.sourceFrame(0)), last = std::min<qint64>(r.last, s.sourceFrame(s.count - 1));
+            if (first <= last) ranges.append({ Sequence::globalIn(s, first), Sequence::globalIn(s, last) });
+        }
         for (const auto& [f, list] : src->annotations)
-            if (f >= 0 && f < s.count) m_reviewKeys.append(s.start + f);
+            if (const int64_t g = Sequence::globalIn(s, f); g >= 0) m_reviewKeys.append(g);
         for (const Track& track : src->tracks)
             for (int f : track.keys)
-                if (f >= 0 && f < s.count) m_reviewKeys.append(s.start + f);
+                if (const int64_t g = Sequence::globalIn(s, f); g >= 0) m_reviewKeys.append(g);
     }
     // While comparing, B's notes show up where the playhead has to be to see them.
     if (m_compareMode != CompareMode::Off && m_seq.segments.size() == 1)
@@ -2508,6 +2876,7 @@ void MainWindow::refreshMarks()
     m_reviewRanges = mergedReviewRanges(std::move(ranges));
     m_timeline->setMarks(m_reviewKeys, marks);
     m_clipBar->setReviewMarks(m_reviewKeys, marks);
+    refreshTimelineEditor();  // keys / bookmarks on the clip blocks (no-op while hidden)
 }
 
 void MainWindow::jumpReviewKey(int direction)
@@ -2562,6 +2931,7 @@ void MainWindow::beginEdit(const QString& sourceId, int frame)
 void MainWindow::commitEdit()
 {
     if (!m_pending) return;
+    ++m_annotationRev;
     if (Source* s = m_project.find(m_pending->sourceId)) {
         if (m_pending->isTrack) {
             const Track* t = s->track(m_pending->trackId);
@@ -2570,6 +2940,7 @@ void MainWindow::commitEdit()
             m_pending->after = s->explicitAt(m_pending->frame);
         }
     }
+    const bool track = m_pending->isTrack;
     m_undo.push_back(*m_pending);
     if (m_undo.size() > 1000) m_undo.removeFirst();
     m_redo.clear();
@@ -2577,12 +2948,64 @@ void MainWindow::commitEdit()
     setDirty(true);
     refreshAnnotations();
     refreshMarks();
+    if (track) refreshMotionGraph();
 }
 
 void MainWindow::applyEdit(const Edit& e, bool forward)
 {
+    if (e.isTimeline) {
+        const auto& doc = forward ? e.docAfter : e.docBefore;
+        if (doc) {
+            // Clips and track count come back; track switches (mute, solo, eye, lock) stay as they are now.
+            TimelineDoc next = m_project.timeline;
+            next.clips = doc->clips;
+            next.width = doc->width;
+            next.height = doc->height;
+            if (next.fps != doc->fps) {
+                const double ratio = doc->fps / next.fps;
+                m_current = std::llround(m_current * ratio);
+                next.loopIn = int(std::llround(next.loopIn * ratio));
+                next.loopOut = int(std::llround((next.loopOut + 1) * ratio)) - 1;
+            }
+            next.fps = doc->fps;
+            auto merge = [](QVector<TrackState>& now, const QVector<TrackState>& then) {
+                QVector<TrackState> out = then;
+                for (qsizetype i = 0; i < std::min(now.size(), out.size()); ++i) out[i] = now[i];
+                now = out;
+            };
+            merge(next.videoTracks, doc->videoTracks);
+            merge(next.audioTracks, doc->audioTracks);
+            merge(next.noteTracks, doc->noteTracks);
+            applyTimeline(next);
+        }
+        setDirty(true);
+        return;
+    }
     Source* s = m_project.find(e.sourceId);
     if (!s) return;
+    ++m_annotationRev;
+    if (e.isNoteClips) {
+        const auto& keys = forward ? e.keysAfter : e.keysBefore;
+        if (keys) s->annotations = *keys;
+        setDirty(true);
+        refreshAnnotations();
+        refreshMarks();
+        return;
+    }
+    if (e.isNote) {
+        const std::optional<QString>& text = forward ? e.noteAfter : e.noteBefore;
+        if (text) s->notes[e.frame] = *text;
+        else s->notes.erase(e.frame);
+        setDirty(true);
+        const int64_t g = m_seq.globalFor(e.sourceId, e.frame, m_seq.indexAt(m_current));
+        if (g >= 0 && g != m_current) goToFrame(g);
+        m_noteFrame = -1;  // the editor shows the restored text even when the frame didn't change
+        m_noteDirty = false;
+        syncNoteEditor();
+        refreshNotes();
+        refreshTimelineEditor();
+        return;
+    }
     if (e.isTrack) {
         const std::optional<Track>& t = forward ? e.trackAfter : e.trackBefore;
         s->tracks.erase(std::remove_if(s->tracks.begin(), s->tracks.end(), [&](const Track& x) { return x.id == e.trackId; }),
@@ -2598,11 +3021,12 @@ void MainWindow::applyEdit(const Edit& e, bool forward)
                           (e.isTrack || e.frame == loc.rawLocal || loc.source->keyAt(int(loc.rawLocal)) == e.frame)) ||
                          (m_compareMode != CompareMode::Off && e.sourceId == m_compareId);
     if (!visible) {
-        const int64_t g = m_seq.globalFor(e.sourceId, e.frame);
+        const int64_t g = m_seq.globalFor(e.sourceId, e.frame, m_seq.indexAt(m_current));
         if (g >= 0) goToFrame(g);
     }
     refreshAnnotations();
     refreshMarks();
+    if (e.isTrack) refreshMotionGraph();
 }
 
 void MainWindow::undo()
@@ -2643,7 +3067,7 @@ MainWindow::EditTarget MainWindow::editTarget()
     t.frame = int(loc.rawLocal);
     t.size = QSizeF(loc.server->info().width, loc.server->info().height);
     t.server = loc.server;
-    t.frameCount = loc.segment->count;
+    t.frameCount = loc.server->frameCount();
     return t;
 }
 
@@ -2678,6 +3102,7 @@ void MainWindow::clearAllInClip()
                               L("Delete all annotations in %1?\nThis can't be undone.", "%1의 주석을 모두 삭제할까요?\n되돌릴 수 없습니다.").arg(t.source->displayName())) != QMessageBox::Yes)
         return;
     t.source->annotations.clear();
+    ++m_annotationRev;
     m_undo.erase(std::remove_if(m_undo.begin(), m_undo.end(), [&](const Edit& e) { return e.sourceId == t.source->id && !e.isTrack; }), m_undo.end());
     m_redo.clear();
     setDirty(true);
@@ -2691,6 +3116,10 @@ void MainWindow::onAnnotationCreated(Annotation a)
     if (!t) return;
     const int f = t.frame;
     beginEdit(t.source->id, f);
+    // Annotation clips: drawn with the same kind at this key = the same clip; otherwise a new one
+    // on the lane above what stays visible with it.
+    notes::placeNew(*t.source, int(std::max<int64_t>(t.frameCount, t.source->frameCount)), f, a,
+                    m_continueDrawing || t.source->explicitAt(f).has_value());
     if (m_continueDrawing)
         t.source->editable(f).append(std::move(a));
     else
@@ -2806,8 +3235,19 @@ void MainWindow::pasteClipboard()
     m_view->setSelection(ids);
 }
 
+bool MainWindow::timelineHasFocus() const
+{
+    const QWidget* focus = QApplication::focusWidget();
+    return m_editor && m_editorDock && m_editorDock->isVisible() && focus &&
+           (focus == m_editorDock || focus == m_editor || m_editor->isAncestorOf(focus));
+}
+
 void MainWindow::deleteContextual()
 {
+    if (timelineHasFocus()) {
+        m_editor->deleteSelection(m_editor->ripple());
+        return;
+    }
     if (m_view->isEditingText()) return;
     const QStringList ids = m_view->selectedIds();
     if (!ids.isEmpty()) {
@@ -2858,6 +3298,26 @@ void MainWindow::joinSelectionToTrack(bool detach)
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event)
 {
+    if (m_noteEdit && obj == m_noteEdit) {
+        // Frame note editor: Ctrl+Enter saves, leaving the field saves too.
+        if (event->type() == QEvent::KeyPress) {
+            auto* k = static_cast<QKeyEvent*>(event);
+            if ((k->key() == Qt::Key_Return || k->key() == Qt::Key_Enter) && (k->modifiers() & Qt::ControlModifier)) {
+                commitNoteEditor();
+                return true;
+            }
+            if (k->key() == Qt::Key_Escape) {
+                m_noteDirty = false;
+                m_noteFrame = -1;
+                syncNoteEditor();
+                m_view->setFocus();
+                return true;
+            }
+        } else if (event->type() == QEvent::FocusOut) {
+            commitNoteEditor();
+        }
+        return QMainWindow::eventFilter(obj, event);
+    }
     if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove || event->type() == QEvent::Drop) {
         auto* drop = static_cast<QDropEvent*>(event);
         QStringList paths;
@@ -3067,6 +3527,7 @@ void MainWindow::startTracking(int direction)
     const QPointF startPos = *t->at(start);
 
     m_trackThread = QThread::create([job, media, fps, start, end, direction, startPos] {
+      try {
         QString err;
         auto src = MediaLibrary::openSource(media.isSequence(), media.path, media.frames, fps, &err);
         if (!src) {
@@ -3124,6 +3585,11 @@ void MainWindow::startTracking(int direction)
             }
         }
         job->done = true;
+      } catch (const std::exception& e) {
+        // Never let an allocation failure in the tracker take the whole app down.
+        job->error = QString::fromLocal8Bit(e.what());
+        job->done = true;
+      }
     });
     m_trackThread->start();
     m_trackPoll.start();
@@ -3153,6 +3619,7 @@ void MainWindow::pollTracking()
             g = a >= 0 ? m_seq.segments.front().start + a : -1;
         }
         if (g >= 0) goToFrame(g); else refreshAnnotations();
+        refreshMotionGraph();
         showToast(L("Tracking  %1 / %2  ·  Esc to stop", "추적 중  %1 / %2 · Esc로 멈춤").arg(m_trackJob->processed).arg(m_trackJob->total), 60000);
     }
     if (!m_trackJob->done) return;
@@ -3196,7 +3663,7 @@ void MainWindow::jumpBookmark(int direction)
     for (const Sequence::Segment& s : m_seq.segments)
         if (const Source* src = m_project.find(s.sourceId))
             for (int f : src->bookmarkFrames())
-                if (f < s.count) all << s.start + f;
+                if (const int64_t g = Sequence::globalIn(s, f); g >= 0) all << g;
     std::sort(all.begin(), all.end());
     if (all.isEmpty()) return;
     if (m_playing) stopPlayback();
@@ -3324,12 +3791,32 @@ void MainWindow::startAudioDecode(const Source& s)
     if (s.media.kind == MediaRef::Kind::Canvas || s.media.isSequence() || m_audioClips.count(s.id)) return;
     const QString id = s.id;
     const QString path = s.media.path;
-    QThread* t = QThread::create([this, id, path] {
+    // Finished decoders are released here instead of piling up until exit.
+    for (auto it = m_audioThreads.begin(); it != m_audioThreads.end();) {
+        if ((*it)->isFinished()) {
+            delete *it;
+            it = m_audioThreads.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    QThread* t = QThread::create([this, id, path, cancel = m_audioCancel] {
         QString err;
-        std::shared_ptr<AudioClip> clip = AudioClip::decode(path, &err);
+        std::shared_ptr<AudioClip> clip;
+        try {
+            clip = AudioClip::decode(path, &err, cancel.get());
+        } catch (const std::bad_alloc&) {
+            clip.reset();  // a soundtrack too big for memory plays silent rather than crashing
+            qWarning().noquote() << "Audio: out of memory decoding" << QFileInfo(path).fileName();
+        }
+        if (cancel->load()) return;
+        if (!err.isEmpty()) qWarning().noquote() << "Audio:" << QFileInfo(path).fileName() << err;
         QMetaObject::invokeMethod(this, [this, id, clip] {
             if (!m_project.find(id)) return;  // removed meanwhile
             m_audioClips[id] = clip;           // null = no audio track
+            computePeaks(id);
+            invalidateMix();
+            refreshTimelineEditor();
             refreshWaveform();
             refreshProperties();
             // Building a long waveform can occupy the UI thread. Start the
@@ -3388,6 +3875,25 @@ bool MainWindow::compareAudioFromB() const
 void MainWindow::syncAudio(bool force)
 {
     if (!m_playing || m_stepped || !m_audio.available()) return;
+    if (timelineAudio()) {
+        // The timeline plays its own mix (every audible sound clip), in timeline seconds.
+        const std::shared_ptr<const AudioMix> mix = timelineMix();
+        const Loc loc = locate(m_current);
+        const bool pictureUp = !loc || m_shownKey == loc.source->id + ':' + QString::number(loc.local);
+        if (!mix || mix->empty() || !pictureUp) {
+            if (m_audio.isPlaying()) m_audio.stop();
+            m_audioPlayingId.clear();
+            return;
+        }
+        const double t = m_current / viewFps();
+        bool restart = force || !m_audio.playingMix();
+        if (!restart) restart = std::abs(m_audio.position() - t) > std::max(0.08, 1.5 / viewFps());
+        if (restart) {
+            m_audio.playMix(mix, t, 1.0);
+            m_audioPlayingId = QStringLiteral("#mix");
+        }
+        return;
+    }
     const Loc loc = locate(m_current);
     if (!loc || m_shownKey != loc.source->id + ':' + QString::number(loc.local)) {
         m_audio.stop(); m_audioPlayingId.clear();
@@ -3415,6 +3921,32 @@ void MainWindow::refreshWaveform()
 {
     QVector<float> peaks;
     bool any = false;
+    if (timelineAudio() && m_seq.total > 0) {
+        // What the mix plays at each timeline frame: the loudest audible clip (gain applied).
+        peaks.fill(0.0f, m_seq.total);
+        const TimelineDoc& doc = m_project.timeline;
+        const tl::LengthFn len = lengthFn();
+        const int bins = TimelineEditor::kPeakBins;
+        for (const TimelineClip& c : doc.clips) {
+            if (!c.isAudio() || !c.enabled || c.muted || !tl::trackAudible(doc, c.track)) continue;
+            auto it = m_peaks.find(c.sourceId);
+            if (it == m_peaks.end()) continue;
+            const QVector<float>& src = it->second;
+            const tl::Span s = tl::span(c, len);
+            const float gain = float(std::min(1.5, dbToGain(c.gainDb) * dbToGain(doc.audioTracks.value(c.track).gainDb)));
+            for (int64_t k = 0; k < s.count && s.start + k < m_seq.total; ++k) {
+                float v = 0;
+                const int64_t f = s.sourceAt(k);
+                for (int b = 0; b < bins && (f * bins + b) < src.size(); ++b) v = std::max(v, src[qsizetype(f * bins + b)]);
+                v = std::min(1.0f, v * gain);
+                float& slot = peaks[qsizetype(s.start + k)];
+                slot = std::max(slot, v);
+                any = any || v > 0.002f;
+            }
+        }
+        applyWaveform(any ? peaks : QVector<float>());
+        return;
+    }
     auto peakOf = [](const AudioClip& clip, double t0, double t1) {
         const int64_t s0 = std::max<int64_t>(0, int64_t((t0 - clip.startTime) * clip.rate));
         const int64_t s1 = std::min<int64_t>(clip.frames(), int64_t((t1 - clip.startTime) * clip.rate) + 1);
@@ -3430,13 +3962,14 @@ void MainWindow::refreshWaveform()
         peaks.fill(0.0f, m_seq.total);
         for (const Sequence::Segment& seg : m_seq.segments)
             for (int64_t local = 0; local < seg.count; ++local) {
+                // Compare runs on one source with no trim, so the segment frame is A's frame.
                 const double t0 = m_compareByTime ? compareTimeFor(local) : bi.timeOf(local);
                 const double t1 = m_compareByTime ? compareTimeFor(local + 1) : bi.timeOf(local + 1);
                 const float v = peakOf(clip, t0, t1);
                 peaks[qsizetype(seg.start + local)] = v;
                 any = any || v > 0.002f;
             }
-        m_timeline->setWaveform(any ? peaks : QVector<float>());
+        applyWaveform(any ? peaks : QVector<float>());
         return;
     }
     if (m_seq.total > 0) {
@@ -3448,7 +3981,8 @@ void MainWindow::refreshWaveform()
             const AudioClip& clip = *it->second;
             const MediaInfo& info = srv->info();
             const int64_t frames = clip.frames();
-            for (int64_t local = 0; local < seg.count; ++local) {
+            for (int64_t i = 0; i < seg.count; ++i) {
+                const int64_t local = seg.offset + i;  // source frame
                 const int64_t s0 = std::max<int64_t>(0, int64_t((info.timeOf(local) - clip.startTime) * clip.rate));
                 const int64_t s1 = std::min<int64_t>(frames, int64_t((info.timeOf(local + 1) - clip.startTime) * clip.rate) + 1);
                 int peak = 0;
@@ -3456,12 +3990,12 @@ void MainWindow::refreshWaveform()
                     peak = std::max({ peak, std::abs(int(clip.pcm[size_t(s) * 2])), std::abs(int(clip.pcm[size_t(s) * 2 + 1])) });
                 // gentle curve so quiet dialogue is still visible next to loud hits
                 const float v = std::pow(peak / 32768.0f, 0.6f);
-                peaks[qsizetype(seg.start + local)] = v;
+                peaks[qsizetype(seg.start + i)] = v;
                 any = any || v > 0.002f;
             }
         }
     }
-    m_timeline->setWaveform(any ? peaks : QVector<float>());
+    applyWaveform(any ? peaks : QVector<float>());
 }
 
 void MainWindow::scrubSound()
@@ -3476,6 +4010,14 @@ void MainWindow::scrubSound()
 void MainWindow::playPendingScrubSound()
 {
     if (!m_scrubSoundPending || m_playing) return;
+    if (timelineAudio()) {
+        const Loc loc = locate(m_current);
+        if (loc && m_shownKey != loc.source->id + ':' + QString::number(loc.local)) return;
+        m_scrubSoundPending = false;
+        const std::shared_ptr<const AudioMix> mix = timelineMix();
+        if (mix && !mix->empty()) m_audio.snippetMix(mix, m_current / viewFps(), std::max(0.045, 1.0 / viewFps()));
+        return;
+    }
     const Loc loc = locate(m_current);
     if (!loc || m_shownKey != loc.source->id + ':' + QString::number(loc.local)) return;
     m_scrubSoundPending = false;
@@ -3517,7 +4059,7 @@ QAction* menuTitle(QMenu& menu, const QString& text)
 }
 } // namespace
 
-void MainWindow::addSourceActions(QMenu& menu, const QString& id, int timelineRow)
+void MainWindow::addSourceActions(QMenu& menu, const QString& id, int timelineRow, const QString& clipUid)
 {
     auto* folders = menu.addMenu(L("Move to Folder", "폴더로 이동"));
     QStringList names = m_project.folders; names.prepend(QString());
@@ -3543,40 +4085,25 @@ void MainWindow::addSourceActions(QMenu& menu, const QString& id, int timelineRo
             menu.addAction(Icons::icon("compare"), L("Compare Off", "비교 끄기"), this, [this] { setCompareMode(CompareMode::Off); });
         else if (!isA)
             menu.addAction(Icons::icon("compare"), L("Compare as B", "B로 비교"), this, [this, id] { chooseB(id); });
-        if (timelineRow >= 0)
-            menu.addAction(L("Go to Clip", "클립으로 이동"), this, [this, timelineRow] {
+        if (!clipUid.isEmpty())
+            menu.addAction(L("Go to Clip", "클립으로 이동"), this, [this, clipUid] {
                 if (!m_soloId.isEmpty()) setSolo(QString());
-                if (timelineRow < m_seq.segments.size()) goToFrame(m_seq.segments[timelineRow].start);
+                const int seg = m_seq.indexOfClip(clipUid);
+                if (seg >= 0) goToFrame(m_seq.segments[seg].start);
             });
         menu.addSeparator();
     }
-    if (timelineRow < 0) {
-        menu.addAction(Icons::icon("timeline-add"), L("Add to Timeline", "타임라인 끝에 추가"), this, [this, id] {
-            m_project.timeline.sourceIds << id;
-            setDirty(true);
-            rebuildSequence();
-            refreshClipList();
-        });
+    if (clipUid.isEmpty()) {
+        menu.addAction(Icons::icon("timeline-add"), L("Add to Timeline", "타임라인 끝에 추가"), this, [this, id] { insertSources({ id }, -1); });
     } else {
-        auto move = [this, timelineRow](int delta) {
-            QStringList& ids = m_project.timeline.sourceIds;
-            if (timelineRow + delta < 0 || timelineRow + delta >= ids.size()) return;
-            ids.swapItemsAt(timelineRow, timelineRow + delta);
-            setDirty(true);
-            rebuildSequence();
-            refreshClipList();
+        auto move = [this, clipUid](int delta) {
+            editTimeline([&](TimelineDoc& doc) { return tl::swapNeighbour(doc, clipUid, delta, lengthFn()); }, L("Reorder Clips", "클립 순서"));
         };
-        QAction* up = menu.addAction(Icons::icon("up"), L("Move Up", "위로"), this, [move] { move(-1); });
+        QAction* up = menu.addAction(Icons::icon("up"), L("Move Earlier", "앞으로"), this, [move] { move(-1); });
         up->setEnabled(timelineRow > 0);
-        QAction* down = menu.addAction(Icons::icon("down"), L("Move Down", "아래로"), this, [move] { move(1); });
-        down->setEnabled(timelineRow + 1 < m_project.timeline.sourceIds.size());
-        menu.addAction(L("Remove from Timeline", "타임라인에서 빼기"), this, [this, timelineRow] {
-            if (timelineRow >= m_project.timeline.sourceIds.size()) return;
-            m_project.timeline.sourceIds.removeAt(timelineRow);
-            setDirty(true);
-            rebuildSequence();
-            refreshClipList();
-        });
+        QAction* down = menu.addAction(Icons::icon("down"), L("Move Later", "뒤로"), this, [move] { move(1); });
+        down->setEnabled(timelineRow + 1 < m_project.timeline.videoClipCount());
+        menu.addAction(Icons::icon("trash"), L("Remove from Timeline", "타임라인에서 빼기"), this, [this, clipUid] { removeClip(clipUid); });
     }
     menu.addSeparator();
     const QString file = s->media.firstFile();
@@ -3900,6 +4427,7 @@ void MainWindow::refreshProjectTree()
         auto* folder = new QTreeWidgetItem(sources, {name});
         folder->setIcon(0, Icons::icon("folder"));
         folder->setData(0, RoleKind, "folder");
+        folder->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
         folder->setData(0, Qt::UserRole + 2, name);
         folders[name] = folder;
     }
@@ -3908,6 +4436,7 @@ void MainWindow::refreshProjectTree()
         it->setIcon(0, Icons::icon(s.media.isSequence() ? "images" : "video"));
         it->setData(0, RoleId, s.id);
         it->setData(0, RoleKind, "source");
+        it->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled);
         const bool online = m_media.server(s.id) != nullptr;
         it->setToolTip(0, QDir::toNativeSeparators(s.media.firstFile()) + (online ? QString() : L("\n(offline)", "\n(오프라인)")));
         if (!online) it->setForeground(0, Pal::textFaint);
@@ -3919,6 +4448,7 @@ void MainWindow::refreshProjectTree()
     auto* tl = new QTreeWidgetItem(timelines, { m_project.timeline.name });
     tl->setIcon(0, Icons::icon("film"));
     tl->setData(0, RoleKind, "timeline");
+    tl->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
     tl->setData(0, RoleId, QStringLiteral("@timeline"));
     if (m_soloId.isEmpty()) tl->setFont(0, bold);
     m_tree->expandAll();
@@ -3928,13 +4458,19 @@ void MainWindow::refreshClipList()
 {
     m_fillingClipList = true;
     m_clipList->clear();
-    for (const QString& id : m_project.timeline.sourceIds) {
-        const Source* s = m_project.find(id);
+    for (const QString& uid : videoClipOrder()) {
+        const TimelineClip& c = *m_project.timeline.clip(uid);
+        const Source* s = m_project.find(c.sourceId);
         if (!s) continue;
-        auto* item = new QListWidgetItem(Icons::icon(s->media.isSequence() ? "images" : "video"), s->displayName());
-        item->setData(RoleId, id);
+        QString label = c.name.isEmpty() ? s->displayName() : c.name;
+        if (c.trimmed()) label += QStringLiteral("  [%1–%2]").arg(c.in).arg(c.out < 0 ? std::max(0, s->frameCount - 1) : c.out);
+        if (c.track > 0) label += QStringLiteral("  · V%1").arg(c.track + 1);
+        auto* item = new QListWidgetItem(Icons::icon(s->media.isSequence() ? "images" : "video"), label);
+        item->setData(RoleId, c.sourceId);
+        item->setData(RoleKind, "source");
+        item->setData(RoleClip, c.uid);
         item->setToolTip(QDir::toNativeSeparators(s->media.firstFile()));
-        if (!m_media.server(id)) item->setForeground(Pal::textFaint);
+        if (!m_media.server(c.sourceId)) item->setForeground(Pal::textFaint);
         m_clipList->addItem(item);
     }
     m_fillingClipList = false;
@@ -3943,7 +4479,19 @@ void MainWindow::refreshClipList()
 void MainWindow::refreshProperties()
 {
     auto* form = static_cast<QFormLayout*>(m_props->layout());
-    while (form->rowCount() > 0) form->removeRow(0);
+    // The FPS box below calls back into this function from its own valueChanged signal, so its
+    // row must not be destroyed synchronously (that freed the spin box mid-signal and crashed).
+    while (form->rowCount() > 0) {
+        const QFormLayout::TakeRowResult row = form->takeRow(0);
+        for (QLayoutItem* item : { row.labelItem, row.fieldItem }) {
+            if (!item) continue;
+            if (QWidget* w = item->widget()) {
+                w->hide();
+                w->deleteLater();
+            }
+            delete item;
+        }
+    }
     form->setContentsMargins(12, 12, 12, 12);
     form->setHorizontalSpacing(14);
     form->setVerticalSpacing(8);
@@ -3965,6 +4513,11 @@ void MainWindow::refreshProperties()
     row(L("Resolution", "해상도"), QStringLiteral("%1 × %2").arg(i.width).arg(i.height));
     row(L("Codec", "코덱"), i.codec);
     row(L("Pixel Format", "픽셀"), i.pixelFormat);
+    row(L("Decoder", "디코더"), i.decoderName.isEmpty() ? QStringLiteral("—") : i.decoderName);
+    if (!loc.segment->clipId.isEmpty() && (loc.segment->offset > 0 || loc.segment->count < i.frameCount))
+        row(L("Clip Range", "클립 범위"), L("%1 – %2  (%3 of %4 frames)", "%1 – %2  (%4프레임 중 %3)")
+                                               .arg(loc.segment->sourceFrame(0)).arg(loc.segment->sourceFrame(loc.segment->count - 1))
+                                               .arg(loc.segment->count).arg(i.frameCount));
     row(L("Source FPS", "원본 FPS"), QString::number(i.fps, 'f', 3) + (i.variableFrameRate ? L("  (variable)", "  (가변)") : QString()));
     row(L("Frames", "프레임"), QString::number(i.frameCount));
     row(L("Duration", "길이"), L("%1 s", "%1초").arg(i.duration, 0, 'f', 2));
@@ -3986,7 +4539,7 @@ void MainWindow::refreshProperties()
     auto* key = new QLabel(m_soloId.isEmpty() ? L("Timeline FPS", "타임라인 FPS") : L("Playback FPS", "재생 FPS"));
     key->setObjectName("FormKey");
     form->addRow(key, fps);
-    row(L("Cache", "캐시"), L("Up to %1", "최대 %1").arg(formatBytes(m_media.cacheBudget())));
+    row(L("Cache", "캐시"), L("Up to %1 · GPU Y'CbCr frames", "최대 %1 · GPU Y'CbCr 프레임").arg(formatBytes(m_media.cacheBudget())));
 }
 
 void MainWindow::setDirty(bool dirty)
@@ -4010,6 +4563,7 @@ void MainWindow::updateReadout()
         return;
     }
     m_readout->setText(QStringLiteral("%1   %2").arg(timecode(m_current, viewFps())).arg(m_current, 5));
+    updateHud();
 }
 
 void MainWindow::changeCacheBudget()
@@ -4041,7 +4595,9 @@ void MainWindow::closeEvent(QCloseEvent* e)
         e->ignore();
         return;
     }
+    if (m_viewerOnly) setViewerOnly(false);  // remember the real layout, not the focus view
     QSettings().setValue("geometry", saveGeometry());
+    saveLayout();
     e->accept();
 }
 

@@ -1,7 +1,9 @@
 #pragma once
 
+#include "analysis/AnalysisFilter.h"
 #include "media/FrameCache.h"
 #include "model/Annotation.h"
+#include "model/Project.h"
 #include "model/Track.h"
 
 #include <QHash>
@@ -13,6 +15,7 @@
 
 #include <optional>
 
+class QOpenGLFramebufferObject;
 class QPlainTextEdit;
 
 enum class Tool { Select, Pencil, Pen, Highlighter, Line, Arrow, Rect, Circle, Text, Eraser, Track };
@@ -28,10 +31,35 @@ public:
     explicit Viewport(QWidget* parent = nullptr);
     ~Viewport() override;
 
+    // The canvas: on a timeline its size, otherwise the size of the source being shown.
     void setMediaSize(QSize size);
     QSize mediaSize() const { return m_media; }
     void setFrame(FrameCache::Ptr image);
     void clearFrame();
+
+    // Where the edited picture (A) sits on the canvas, its own pixel size and how it is
+    // composited. Its annotations and tracks live in its own pixels and follow it. An empty
+    // rect = the whole canvas (a source shown on its own).
+    void setPrimaryPlacement(QSize size, QRectF rect, float opacity = 1.f, BlendMode blend = BlendMode::Normal);
+    QRectF primaryRect() const;
+    // Other video tracks at this frame, bottom first: `below` are drawn under A, `above` over it
+    // (the higher track always wins, like an editing program).
+    struct Layer {
+        FrameCache::Ptr frame;
+        QRectF rect;  // canvas pixels
+        float opacity = 1.f;
+        BlendMode blend = BlendMode::Normal;
+        FrameCache::Ptr reference;  // filter reference (background plate / previous frame)
+    };
+    void setLayers(QVector<Layer> below, QVector<Layer> above);
+    int layerCount() const { return int(m_below.size() + m_above.size()); }
+
+    // Analysis filter (Filter menu) on every video picture; `threshold` is the effective one.
+    void setFilter(const AnalysisFilter& filter, double threshold);
+    const AnalysisFilter& filter() const { return m_filter; }
+    double filterThreshold() const { return m_filterThreshold; }
+    // Background plate (moving silhouette) or previous frame (motion highlight) of A and B.
+    void setFilterReference(FrameCache::Ptr a, FrameCache::Ptr b = nullptr);
 
     void setCompareMode(CompareMode mode);
     CompareMode compareMode() const { return m_compare; }
@@ -59,6 +87,8 @@ public:
         FrameCache::Ptr frame;
         double opacity;
         int side = 0;
+        QColor tint;                // onion colour for this direction
+        double tintStrength = 0.0;  // 0 = true colours
     };
     void setOnion(QVector<Ghost> notes, QVector<FrameGhost> frames);
 
@@ -92,6 +122,13 @@ public:
     void fitToView();
     void setZoom(double zoom);
     double zoom() const { return m_zoom; }
+    // Mirror the view left/right (animators check silhouettes and drawings this way).
+    void setFlipHorizontal(bool on);
+    bool flipHorizontal() const { return m_flipH; }
+    // Frame counter overlay in the lower-left corner.
+    void setHud(const QString& text);
+    void setShowHud(bool on);
+    bool showHud() const { return m_showHud; }
     double displayScale() const;  // screen pixels per media pixel
 
 signals:
@@ -132,10 +169,17 @@ protected:
 private:
     friend class FeatureRegression;
     struct Tex {
-        GLuint id = 0;
-        QSize size;
+        GLuint id[3] = { 0, 0, 0 };  // RGBA, or Y' / Cb / Cr planes
+        QSize size[3];
+        int layout = -1;             // 0 = RGBA, 1 = planar Y'CbCr
         FrameCache::Ptr frame;
         bool dirty = false;
+    };
+    struct GhostInfo {
+        double opacity = 0;
+        int side = 0;
+        QColor tint;
+        double tintStrength = 0;
     };
     enum class Drag { None, Pan, Draw, Erase, Move, Scale, Rotate, Marquee, Wipe, TrackMove, Scrub };
     struct Gizmo {
@@ -164,8 +208,23 @@ private:
     QRectF layerClip(int side) const;  // where a side's image is visible, in A pixels
     QVector<Item>& items() { return m_layers[m_side]; }
     const QVector<Item>& items() const { return m_layers[m_side]; }
+    struct LayerTex {
+        Tex tex;
+        Tex ref;
+        QRectF rect;
+        float opacity = 1.f;
+        BlendMode blend = BlendMode::Normal;
+    };
     void upload(Tex& t);
-    void drawTexture(Tex& t, const QRectF& mediaRect, float opacity, const QRectF* clip);
+    void release(Tex& t);
+    void setTexFrame(Tex& t, FrameCache::Ptr frame);
+    void drawTexture(Tex& t, const QRectF& mediaRect, float opacity, const QRectF* clip,
+                     const QColor& tint = QColor(), float tintStrength = 0.f, Tex* ref = nullptr,
+                     BlendMode blend = BlendMode::Normal, bool filtered = true);
+    void drawVideoStack();
+    void drawGhosts(int side);
+    void drawFramebuffer(GLuint texture);
+    QTransform primaryToCanvas() const;
     void updateDraft(const QPointF& mediaPt, Qt::KeyboardModifiers mods = {});
     QRectF annotationClip(int side) const;
     bool nearWipe(const QPointF& widgetPos) const;
@@ -187,9 +246,27 @@ private:
     QSize m_media{ 1920, 1080 };
     Tex m_a;
     Tex m_b;
+    Tex m_aRef;
+    Tex m_bRef;
+    QSize m_aSize;      // A's own pixels (invalid = the canvas)
+    QRectF m_aRect;     // where A sits on the canvas (empty = all of it)
+    float m_aOpacity = 1.f;
+    BlendMode m_aBlend = BlendMode::Normal;
+    QVector<LayerTex> m_below;
+    QVector<LayerTex> m_above;
+    AnalysisFilter m_filter;
+    double m_filterThreshold = 0.5;
+    QOpenGLFramebufferObject* m_stackFbo = nullptr;  // for Difference: the stack drawn off screen
+    GLuint m_dstTex = 0;                             // copy of what is under a Difference layer
+    QSize m_dstSize;
     QVector<Tex> m_ghostTex;
-    QVector<int> m_ghostSide;
-    QVector<double> m_ghostOpacity;
+    QVector<GhostInfo> m_ghostInfo;
+    GLenum m_planeFormat = GL_LUMINANCE;       // one 8-bit channel (Y', Cb, Cr)
+    GLenum m_pairFormat = GL_LUMINANCE_ALPHA;  // two channels (NV12 Cb/Cr)
+    bool m_glReady = false;
+    bool m_flipH = false;
+    bool m_showHud = false;
+    QString m_hud;
     QSize m_bSize;
     CompareMode m_compare = CompareMode::Off;
     double m_wipe = 0.5;

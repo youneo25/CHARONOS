@@ -2,13 +2,13 @@
   #error PackageDir must point to the deployed application folder
 #endif
 #ifndef Version
-  #define Version "0.0.1"
+  #define Version "1.1.0"
 #endif
 #ifndef DisplayVersion
-  #define DisplayVersion "Beta " + Version
+  #define DisplayVersion Version
 #endif
 #ifndef PackageVersion
-  #define PackageVersion Version + "-beta"
+  #define PackageVersion Version
 #endif
 
 [Setup]
@@ -16,6 +16,7 @@ AppId={{541A5B3B-408C-478D-AD80-2AE20787183E}
 AppName=CHARONOS
 AppVersion={#DisplayVersion}
 AppPublisher=CHARONOS
+AppComments=Frame-accurate reference review and analysis for animators
 DefaultDirName={localappdata}\Programs\CHARONOS
 DefaultGroupName=CHARONOS
 PrivilegesRequired=lowest
@@ -50,6 +51,7 @@ Source: "{#PackageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 
 [Icons]
 Name: "{group}\CHARONOS"; Filename: "{app}\CHARONOS.exe"; Tasks: startmenu
+Name: "{group}\CHARONOS User Guide"; Filename: "{app}\docs\CHARONOS-User-Guide.html"; Tasks: startmenu
 Name: "{autodesktop}\CHARONOS"; Filename: "{app}\CHARONOS.exe"; Tasks: desktopicon
 
 [Registry]
