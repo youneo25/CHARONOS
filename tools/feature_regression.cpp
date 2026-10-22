@@ -9,6 +9,15 @@
 #include "ui/Timeline.h"
 #include "ui/Palette.h"
 #include "media/VideoDecoder.h"
+#include "ai/McpServer.h"
+#include "ui/Icons.h"
+#include "ui/MotionGraph.h"
+#include "ui/TimelineEditor.h"
+#include "model/NoteClips.h"
+#include "model/TimelineModel.h"
+#include "analysis/AnalysisFilter.h"
+#include "media/AudioMix.h"
+#include "media/AudioClip.h"
 #include <QAction>
 #include <QAbstractItemView>
 #include <QComboBox>
@@ -18,7 +27,9 @@
 #include <QSpinBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QDir>
 #include <QDockWidget>
+#include <QElapsedTimer>
 #include <QSlider>
 #include <QInputDialog>
 #include <QKeySequenceEdit>
@@ -34,10 +45,14 @@
 #include <QJsonArray>
 #include <QImageWriter>
 #include <QListWidget>
+#include <QMenu>
+#include <QSplitter>
 #include <QMimeData>
 #include <QPainter>
 #include <QPointingDevice>
 #include <QSettings>
+#include <QScopeGuard>
+#include <QScrollBar>
 #include <QSignalSpy>
 #include <QSurfaceFormat>
 #include <QTabletEvent>
@@ -55,7 +70,7 @@ public:
     std::atomic<int> decoded{0};
     CountingUhdSource() { data.width=3840; data.height=2160; data.fps=60; data.frameCount=300; image.fill(Qt::black); }
     const MediaInfo& info() const override { return data; }
-    bool decode(int64_t, QImage& out, QString*, const FrameSink*) override { ++decoded; out=image; return true; }
+    bool decode(int64_t, QImage& out, QString*) override { ++decoded; out=image; return true; }
 };
 
 class SlowLoopSource final : public FrameSource {
@@ -65,7 +80,7 @@ public:
     std::atomic<bool> delayFirst{false};
     SlowLoopSource() { data.width=64; data.height=48; data.fps=24; data.frameCount=24; image.fill(Qt::black); }
     const MediaInfo& info() const override { return data; }
-    bool decode(int64_t index, QImage& out, QString*, const FrameSink*) override {
+    bool decode(int64_t index, QImage& out, QString*) override {
         if (index==0 && delayFirst) QThread::msleep(180);
         out=image; return true;
     }
@@ -102,6 +117,56 @@ class FeatureRegression : public QObject {
         QApplication::sendEvent(target, &dropped);
         QVERIFY(dropped.isAccepted());
     }
+    // ===================================================================== 1.1
+    // Window screenshot with the viewer's own rendering on top (a window grab reuses the GL
+    // widget's last composed frame, without the annotation overlay).
+    static bool windowShot(MainWindow& w, const QString& path) {
+        QImage shot=w.grab().toImage();
+        const QImage view=w.m_view->grabFramebuffer();
+        QPainter p(&shot);
+        p.drawImage(QRectF(w.m_view->mapTo(&w,QPoint(0,0)),QSizeF(w.m_view->size())),view);
+        p.end();
+        return shot.save(path);
+    }
+    static bool near(const QColor& a, const QColor& b, int tol) {
+        return std::abs(a.red()-b.red())<=tol && std::abs(a.green()-b.green())<=tol && std::abs(a.blue()-b.blue())<=tol;
+    }
+    static QColor viewPixel(Viewport& v, QPointF media) {
+        const QImage img=v.grabFramebuffer();
+        const QPointF p=v.mediaToWidget().map(media)*v.devicePixelRatioF();
+        return img.pixelColor(std::clamp(int(p.x()),0,img.width()-1),std::clamp(int(p.y()),0,img.height()-1));
+    }
+    static void press(QWidget* w, QPointF at, Qt::KeyboardModifiers mods={}) {
+        QMouseEvent e(QEvent::MouseButtonPress,at,w->mapToGlobal(at.toPoint()),Qt::LeftButton,Qt::LeftButton,mods); QApplication::sendEvent(w,&e);
+    }
+    static void moveTo(QWidget* w, QPointF at, Qt::KeyboardModifiers mods={}) {
+        QMouseEvent e(QEvent::MouseMove,at,w->mapToGlobal(at.toPoint()),Qt::NoButton,Qt::LeftButton,mods); QApplication::sendEvent(w,&e);
+    }
+    static void release(QWidget* w, QPointF at, Qt::KeyboardModifiers mods={}) {
+        QMouseEvent e(QEvent::MouseButtonRelease,at,w->mapToGlobal(at.toPoint()),Qt::LeftButton,Qt::NoButton,mods); QApplication::sendEvent(w,&e);
+    }
+    static void dragOn(QWidget* w, QPointF from, QPointF to, Qt::KeyboardModifiers mods={}) {
+        press(w,from,mods);
+        for (int i=1;i<=6;++i) moveTo(w,from+(to-from)*(i/6.0),mods);
+        release(w,to,mods);
+    }
+    static void key(QWidget* w, int k, Qt::KeyboardModifiers mods={}) {
+        QKeyEvent over(QEvent::ShortcutOverride,k,mods); QApplication::sendEvent(w,&over);
+        QKeyEvent down(QEvent::KeyPress,k,mods); QApplication::sendEvent(w,&down);
+    }
+    QString videoClipOf(MainWindow& w, const QString& sourceId) {
+        for (const TimelineClip& c : w.m_project.timeline.clips) if (c.isVideo() && c.sourceId==sourceId) return c.uid;
+        return {};
+    }
+    void showEditor(MainWindow& w) {
+        QAction* show=w.findChild<QAction*>("Window/Timeline");
+        if (w.m_editorDock->isHidden()) show->trigger();
+        QTRY_VERIFY(w.m_editorDock->isVisible());
+        w.m_editorDock->resize(1300,330); QTest::qWait(60);
+        w.m_editor->zoomToFit(); QTest::qWait(60);
+    }
+
+    QStringList videoClipOrder(MainWindow& w) { return w.videoClipOrder(); }
 private slots:
     void initTestCase() {
         QVERIFY(temp.isValid());
@@ -134,7 +199,7 @@ private slots:
     }
     void resizeEveryAnnotationKind() {
         Viewport v; v.resize(800,600); v.setMediaSize(QSize(320,180));
-        auto image=std::make_shared<QImage>(320,180,QImage::Format_RGB32); image->fill(Qt::black); v.setFrame(image);
+        auto image=std::make_shared<QImage>(320,180,QImage::Format_RGB32); image->fill(Qt::black); v.setFrame(VideoFrame::share(*image));
         v.show(); QVERIFY(QTest::qWaitForWindowExposed(&v));
         for (const QString& type : {"stroke","line","arrow","rect","circle","text"}) {
             Annotation a=rect(); a.type=type; a.points={{.1,.2},{.3,.45}};
@@ -158,7 +223,7 @@ private slots:
     }
     void pressureForAllStyles() {
         Viewport v; v.resize(800,500); v.setMediaSize(QSize(320,180));
-        auto image=std::make_shared<QImage>(320,180,QImage::Format_RGB32); image->fill(Qt::black); v.setFrame(image);
+        auto image=std::make_shared<QImage>(320,180,QImage::Format_RGB32); image->fill(Qt::black); v.setFrame(VideoFrame::share(*image));
         QPointingDevice pen("Regression pen", 11, QInputDevice::DeviceType::Stylus, QPointingDevice::PointerType::Pen,
                             QInputDevice::Capability::Position | QInputDevice::Capability::Pressure, 1, 1);
         for (Tool tool : {Tool::Pencil,Tool::Pen,Tool::Highlighter}) {
@@ -227,26 +292,26 @@ private slots:
         Source& src=window->m_project.sources[0];
         src.annotations.clear(); src.tracks.clear();
         Annotation a=rect(); src.annotations[0]={a}; a.x=.4; src.annotations[4]={a}; a.x=.6; src.annotations[8]={a};
-        window->m_onion=true; window->m_onionBefore=2; window->m_onionAfter=1; window->m_onionVideo=1;
+        window->m_onion=true; window->m_onionBefore=2; window->m_onionAfter=1; window->m_onionVideoBefore=1; window->m_onionVideoAfter=1;
         window->goToFrame(5);
         QCOMPARE(window->m_view->m_ghosts.size(),2);
         QCOMPARE(window->m_view->m_ghosts[0].annotation.x,.12);
         QCOMPARE(window->m_view->m_ghosts[1].annotation.x,.6);
-        QTRY_VERIFY_WITH_TIMEOUT(window->m_view->m_ghostOpacity.size()==2,10000);
+        QTRY_VERIFY_WITH_TIMEOUT(window->m_view->m_ghostInfo.size()==2,10000);
         src.annotations[6]={}; window->goToFrame(6);
         QVERIFY(window->m_view->items().isEmpty());
         QCOMPARE(window->m_view->m_ghosts.size(),3);
         window->m_onion=false; window->refreshAnnotations();
-        QVERIFY(window->m_view->m_ghosts.isEmpty()); QVERIFY(window->m_view->m_ghostOpacity.isEmpty());
+        QVERIFY(window->m_view->m_ghosts.isEmpty()); QVERIFY(window->m_view->m_ghostInfo.isEmpty());
     }
     void compareGridAndVideoGhosts() {
         Viewport v; v.resize(1000,700); v.setMediaSize(QSize(320,180));
-        // FrameServer delivers RGBA8888 images to the GL texture upload path.
+        // Stills reach the GL upload path as RGBA frames (video arrives as Y'CbCr planes).
         auto black=std::make_shared<QImage>(320,180,QImage::Format_RGBA8888); black->fill(Qt::black);
         auto b=std::make_shared<QImage>(240,320,QImage::Format_RGBA8888); b->fill(Qt::black);
         auto red=std::make_shared<QImage>(320,180,QImage::Format_RGBA8888); red->fill(Qt::red);
         auto blue=std::make_shared<QImage>(240,320,QImage::Format_RGBA8888); blue->fill(Qt::blue);
-        v.setFrame(black); v.setCompareFrame(b,b->size()); v.setCompareLabels("A","B");
+        v.setFrame(VideoFrame::share(*black)); v.setCompareFrame(VideoFrame::share(*b),b->size()); v.setCompareLabels("A","B");
         v.show(); QVERIFY(QTest::qWaitForWindowExposed(&v));
         auto sample=[&](const QImage& image,QPointF point) {
             const qreal dpr=image.devicePixelRatio(); return image.pixelColor(qRound(point.x()*dpr),qRound(point.y()*dpr));
@@ -259,7 +324,7 @@ private slots:
             // B's grid at 2/3 width, 1/4 height, away from labels and selection border.
             QPointF pt=v.annoToWidget(1).map(QPointF(240.*2/3,320.*.25));
             QVERIFY2(sample(grid,pt).red()>sample(plain,pt).red()+10,"Grid absent on B");
-            v.setShowGrid(false); v.setOnion({},{{red,.28,0},{blue,.28,1}});
+            v.setShowGrid(false); v.setOnion({},{{VideoFrame::share(*red),.28,0},{VideoFrame::share(*blue),.28,1}});
             QTest::qWait(25); const QImage ghosts=v.grabFramebuffer();
             const QPointF bp=v.annoToWidget(1).map(QPointF(240*.8,320*.7));
             QVERIFY(ghosts.save(QApplication::applicationDirPath()+QString("/qa-ghost-%1.png").arg(int(mode))));
@@ -281,7 +346,7 @@ private slots:
         Annotation changed=window->m_view->items()[0].annotation; changed.stretchX=1.8; changed.stretchY=.7;
         window->onAnnotationsEdited({changed});
         QCOMPARE(b.annotations[0][0].stretchX,1.8); QCOMPARE(b.annotations[0][0].stretchY,.7);
-        window->m_onion=true; window->m_onionVideo=1; window->refreshAnnotations();
+        window->m_onion=true; window->m_onionVideoBefore=1; window->m_onionVideoAfter=1; window->refreshAnnotations();
         window->m_view->setShowGrid(true);
         QTest::qWait(100);
         QCOMPARE(window->m_view->compareMode(),CompareMode::SideBySide);
@@ -401,7 +466,7 @@ private slots:
         Viewport v; v.resize(900,650); v.setMediaSize({320,180});
         auto a=std::make_shared<QImage>(320,180,QImage::Format_RGBA8888); a->fill(QColor(64,128,192));
         auto b=std::make_shared<QImage>(320,180,QImage::Format_RGBA8888); b->fill(QColor(180,90,30));
-        v.setFrame(a); v.setCompareFrame(b,b->size()); v.show(); QVERIFY(QTest::qWaitForWindowExposed(&v));
+        v.setFrame(VideoFrame::share(*a)); v.setCompareFrame(VideoFrame::share(*b),b->size()); v.show(); QVERIFY(QTest::qWaitForWindowExposed(&v));
         for (CompareMode compare : {CompareMode::Off,CompareMode::Wipe,CompareMode::SideBySide,CompareMode::TopBottom,CompareMode::Blend}) {
             v.setCompareMode(compare);
             for (int side : {0,1}) {
@@ -418,7 +483,7 @@ private slots:
             }
         }
         v.setCompareMode(CompareMode::Off); v.setColorChannel(ColorChannel::Green);
-        v.setOnion({},{{b,.28,0}});
+        v.setOnion({},{{VideoFrame::share(*b),.28,0}});
         const QImage ghost=v.grabFramebuffer();
         const QPoint pt=(v.annoToWidget(0).map(QPointF(160,90))*ghost.devicePixelRatio()).toPoint();
         const QColor pixel=ghost.pixelColor(pt); QCOMPARE(pixel.red(),0); QCOMPARE(pixel.blue(),0); QVERIFY(pixel.green()>90);
@@ -583,7 +648,7 @@ private slots:
             QCOMPARE(window->m_penStyle,tool);
         }
         Viewport v; v.resize(800,500); v.setMediaSize({320,180});
-        auto image=std::make_shared<QImage>(320,180,QImage::Format_RGB32); image->fill(Qt::black); v.setFrame(image);
+        auto image=std::make_shared<QImage>(320,180,QImage::Format_RGB32); image->fill(Qt::black); v.setFrame(VideoFrame::share(*image));
         v.show(); QVERIFY(QTest::qWaitForWindowExposed(&v));
         for (Tool tool : {Tool::Pencil,Tool::Pen,Tool::Highlighter}) {
             v.setTool(tool); QSignalSpy created(&v,&Viewport::annotationCreated);
@@ -612,8 +677,8 @@ private slots:
     }
     void annotationsOutsideVideo() {
         Viewport v; v.resize(900,650); v.setMediaSize({320,180});
-        auto image=std::make_shared<QImage>(320,180,QImage::Format_RGB32); image->fill(Qt::black); v.setFrame(image);
-        v.setCompareFrame(image,{320,180}); v.setCompareMode(CompareMode::SideBySide);
+        auto image=std::make_shared<QImage>(320,180,QImage::Format_RGB32); image->fill(Qt::black); v.setFrame(VideoFrame::share(*image));
+        v.setCompareFrame(VideoFrame::share(*image),{320,180}); v.setCompareMode(CompareMode::SideBySide);
         Annotation a=rect("outside"); a.x=.2; a.y=-.4; a.w=.2; a.h=.15; a.size=6;
         v.setAnnotations({{a,false}}); v.setCompareAnnotations({{a,false}});
         v.show(); QVERIFY(QTest::qWaitForWindowExposed(&v)); QTest::qWait(100);
@@ -1064,6 +1129,1115 @@ private slots:
         w.m_soloLoop=true; w.m_soloIn=80; w.m_soloOut=120; w.goToFrame(0); w.togglePlay(); w.m_playTimer.stop();
         QCOMPARE(w.m_current,80); // an explicitly enabled In/Out range is still respected
         w.stopPlayback(); w.m_dirty=false;
+    }
+    // ======================================================================== 1.0
+    void yuvFramesRenderOnGpuLikeCpu() {
+        const QString video=QApplication::applicationDirPath()+"/qa-yuv-quads.mp4";
+        QVERIFY2(QFileInfo::exists(video),"run tools/test-features.bat to create the test clips");
+        VideoDecoder dec; QString error; QVERIFY2(dec.open(video,&error),qPrintable(error));
+        VideoFrame f; QVERIFY2(dec.decodeFrame(6,f,&error),qPrintable(error));
+        QVERIFY(f.isYuv());
+        QCOMPARE(f.sizeInBytes(),qint64(320*180*3/2));                    // 4:2:0 = 1.5 bytes per pixel
+        QVERIFY(f.sizeInBytes()*100<=qint64(320)*180*4*40);               // >= 60% less than RGBA
+        const QImage cpu=f.toImage(); QCOMPARE(cpu.size(),QSize(320,180));
+        Viewport v; v.resize(760,480); v.setMediaSize({320,180});
+        v.setFrame(std::make_shared<const VideoFrame>(std::move(f)));
+        v.show(); QVERIFY(QTest::qWaitForWindowExposed(&v)); v.setZoom(2.0); QTest::qWait(60);
+        const QImage gpu=v.grabFramebuffer();
+        QVERIFY(gpu.save(QApplication::applicationDirPath()+"/qa-gpu-yuv.png"));
+        const QPointF centres[]={{80,45},{240,45},{80,135},{240,135}};
+        const QColor expected[]={QColor(255,0,0),QColor(0,255,0),QColor(0,0,255),QColor(128,128,128)};
+        int worstCpu=0, worstTruth=0;
+        for (int i=0;i<4;++i) {
+            const QColor g=gpu.pixelColor((v.annoXf().map(centres[i])*gpu.devicePixelRatio()).toPoint());
+            const QColor c=cpu.pixelColor(centres[i].toPoint());
+            worstCpu=std::max({worstCpu,std::abs(g.red()-c.red()),std::abs(g.green()-c.green()),std::abs(g.blue()-c.blue())});
+            worstTruth=std::max({worstTruth,std::abs(g.red()-expected[i].red()),std::abs(g.green()-expected[i].green()),std::abs(g.blue()-expected[i].blue())});
+        }
+        QVERIFY2(worstCpu<=4,qPrintable(QString("GPU vs CPU conversion differs by %1").arg(worstCpu)));
+        QVERIFY2(worstTruth<=10,qPrintable(QString("GPU colours off by %1").arg(worstTruth)));
+        // Mirrored view: the picture flips with the overlay transform.
+        v.setFlipHorizontal(true); QTest::qWait(40);
+        const QImage flipped=v.grabFramebuffer();
+        const QColor redSide=flipped.pixelColor((v.annoXf().map(centres[0])*flipped.devicePixelRatio()).toPoint());
+        QVERIFY(redSide.red()>200 && redSide.green()<60);
+        QVERIFY(v.annoXf().map(centres[0]).x()>v.annoXf().map(centres[1]).x());
+    }
+    void nvdecAndCpuDecodeTheSameFrames() {
+        const QString video=QApplication::applicationDirPath()+"/qa-audio-loop.mp4";
+        QString error;
+        VideoDecoder::setHardwareDecodingEnabled(true);
+        VideoDecoder hw; QVERIFY2(hw.open(video,&error),qPrintable(error));
+        VideoDecoder::setHardwareDecodingEnabled(false);
+        VideoDecoder sw; QVERIFY2(sw.open(video,&error),qPrintable(error));
+        VideoDecoder::setHardwareDecodingEnabled(true);
+        QVERIFY(!sw.hardwareActive());
+        qInfo().noquote() << "hardware decoder:" << hw.info().decoderName;
+        for (int64_t i : {int64_t(0),int64_t(17),int64_t(5),int64_t(47),int64_t(30)}) {   // random order forces seeks
+            VideoFrame a, b; QVERIFY(hw.decodeFrame(i,a,&error)); QVERIFY(sw.decodeFrame(i,b,&error));
+            QVERIFY2(std::abs(a.averageLuma()-b.averageLuma())<0.75,qPrintable(QString("frame %1 differs").arg(i)));
+        }
+    }
+    void timelineTrimSplitMoveUndoAndSave() {
+        MainWindow w; w.resize(1400,900); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        QVERIFY(w.m_editorDock->isHidden());                                // hidden until Window > Timeline
+        w.createCanvas("Shot A",{160,90},48,24);
+        w.createCanvas("Shot B",{160,90},24,24);
+        w.setSolo(QString());
+        QCOMPARE(w.m_project.timeline.clips.size(),2); QCOMPARE(w.m_seq.total,int64_t(72));
+        const QString idA=w.m_project.timeline.clips[0].sourceId;
+        w.goToFrame(20); w.splitAtPlayhead();
+        QCOMPARE(w.m_project.timeline.clips.size(),3);
+        QCOMPARE(w.m_project.timeline.clips[0].out,19); QCOMPARE(w.m_project.timeline.clips[1].in,20);
+        QCOMPARE(w.m_seq.total,int64_t(72)); QCOMPARE(w.locate(w.m_current).rawLocal,int64_t(20));
+        const QString tail=w.m_project.timeline.clips[1].uid, shotB=w.m_project.timeline.clips[2].uid;
+        // 1.1: without ripple a trim leaves a gap; with ripple the clips close up like 1.0's magnetic timeline.
+        w.m_editor->setRipple(false);
+        w.trimClip(tail,30,39);
+        QCOMPARE(w.m_seq.total,int64_t(72)); QVERIFY(w.m_seq.at(25)->isGap()); QCOMPARE(w.m_project.timeline.clip(tail)->start,qint64(30));
+        w.undo();
+        w.m_editor->setRipple(true);
+        w.trimClip(tail,30,39);
+        QCOMPARE(w.m_seq.total,int64_t(20+10+24)); QCOMPARE(w.locate(25).rawLocal,int64_t(35));
+        w.goToFrame(25); w.onAnnotationCreated(rect("on-tail"));
+        QVERIFY(w.m_project.find(idA)->explicitAt(35));                     // keyed by source frame
+        QVERIFY(w.m_reviewKeys.contains(25));
+        w.moveClip(shotB,0); QCOMPARE(w.m_project.timeline.clips[0].uid,shotB); QCOMPARE(w.m_seq.segments[0].count,int64_t(24));
+        w.undo(); QCOMPARE(w.m_project.timeline.clips[2].uid,shotB);           // move
+        w.undo(); QVERIFY(!w.m_project.find(idA)->explicitAt(35));             // annotation
+        w.undo(); QCOMPARE(w.m_project.timeline.clips[1].in,20); QCOMPARE(w.m_project.timeline.clips[1].out,-1);  // trim
+        w.undo(); QCOMPARE(w.m_project.timeline.clips.size(),2); QCOMPARE(w.m_seq.total,int64_t(72));            // split
+        w.redo(); w.redo(); QCOMPARE(w.m_project.timeline.clips.size(),3); QCOMPARE(w.m_project.timeline.clips[1].in,30);
+        // Export follows the trims: timeline frame 25 is source frame 35 of Shot A.
+        w.goToFrame(25); w.onAnnotationCreated(rect("export-check"));
+        {
+            ExportJob job; job.project=w.m_project; job.sequence=w.m_seq; job.first=24; job.last=26; job.fps=24;
+            job.format=ExportJob::Format::PngSequence; job.output=temp.filePath("trim/frame");
+            std::atomic<int64_t> done{0}; std::atomic<bool> cancel{false}; QString exportError;
+            QVERIFY2(runExport(job,done,cancel,&exportError),qPrintable(exportError));
+            auto reds=[](const QImage& img) { int n=0; for (int y=0;y<img.height();++y) for (int x=0;x<img.width();++x) { const QColor c=img.pixelColor(x,y); if (c.red()>150 && c.green()<90) ++n; } return n; };
+            QCOMPARE(reds(QImage(temp.filePath("trim/frame_0000.png"))),0);    // source frame 34: nothing drawn yet
+            QVERIFY(reds(QImage(temp.filePath("trim/frame_0001.png")))>20);    // source frame 35: the rectangle
+        }
+        const QString path=temp.filePath("trims.frvm"); QString error; QVERIFY2(w.m_project.save(path,&error),qPrintable(error));
+        Project loaded; QVERIFY(loaded.load(path,&error));
+        QCOMPARE(loaded.timeline.clips.size(),3); QCOMPARE(loaded.timeline.clips[1].in,30); QCOMPARE(loaded.timeline.clips[1].out,39);
+        QCOMPARE(loaded.timeline.clips[1].uid,tail);
+        QAction* show=w.findChild<QAction*>("Window/Timeline"); QVERIFY(show); show->trigger();
+        QTRY_VERIFY(w.m_editorDock->isVisible());
+        QCOMPARE(w.m_editor->clipCount(),3); QCOMPARE(w.m_editor->currentFrame(),w.m_current);
+        w.m_editor->zoomToFit(); QTest::qWait(250);
+        QVERIFY(w.grab().save(QApplication::applicationDirPath()+"/qa-timeline-editor.png"));
+        // Trimmed-away frames: next/previous annotated frame skips them.
+        w.goToFrame(0); QCOMPARE(w.annotatedGlobals(),QVector<qint64>({25}));
+        w.m_editor->setRipple(false);
+        w.m_dirty=false;
+    }
+    void timelineVisibilityPersistsOnlyAfterClosing() {
+        QSettings settings;
+        QMap<QString,QVariant> saved;
+        settings.beginGroup("layout");
+        for (const QString& key : settings.allKeys()) saved[key]=settings.value(key);
+        settings.endGroup();
+        const QVariant geometry=settings.value("geometry");
+        const auto restore=qScopeGuard([&] {
+            settings.remove("layout"); settings.beginGroup("layout");
+            for (auto it=saved.begin();it!=saved.end();++it) settings.setValue(it.key(),it.value());
+            settings.endGroup();
+            if (geometry.isValid()) settings.setValue("geometry",geometry); else settings.remove("geometry");
+        });
+        settings.remove("layout");
+        {
+            MainWindow first; first.show(); QVERIFY(QTest::qWaitForWindowExposed(&first));
+            QVERIFY(first.m_editorDock->isHidden());
+            first.findChild<QAction*>("Window/Timeline")->trigger(); QTRY_VERIFY(first.m_editorDock->isVisible());
+            QVERIFY(!settings.contains("layout/timelineVisible")); // toggling alone is not a completed exit
+            first.m_dirty=false; QVERIFY(first.close());
+        }
+        QVERIFY(settings.value("layout/timelineVisible").toBool());
+        const QByteArray visibleState=settings.value("layout/state").toByteArray();
+        {
+            MainWindow reopened; reopened.show(); QVERIFY(QTest::qWaitForWindowExposed(&reopened));
+            QTRY_VERIFY(reopened.m_editorDock->isVisible());
+            reopened.setViewerOnly(true); QVERIFY(!reopened.m_editorDock->isVisible());
+            reopened.m_dirty=false; QVERIFY(reopened.close()); // temporary focus view must not erase the choice
+        }
+        QVERIFY(settings.value("layout/timelineVisible").toBool());
+        {
+            MainWindow third; third.show(); QVERIFY(QTest::qWaitForWindowExposed(&third));
+            QTRY_VERIFY(third.m_editorDock->isVisible());
+            third.findChild<QAction*>("Window/Timeline")->trigger(); QVERIFY(third.m_editorDock->isHidden());
+            third.m_dirty=false; QVERIFY(third.close());
+        }
+        QVERIFY(!settings.value("layout/timelineVisible").toBool());
+        {
+            MainWindow fourth; fourth.show(); QVERIFY(QTest::qWaitForWindowExposed(&fourth));
+            QVERIFY(fourth.m_editorDock->isHidden()); fourth.m_dirty=false;
+        }
+        settings.remove("layout/timelineVisible"); settings.setValue("layout/state",visibleState);
+        {
+            MainWindow legacy; legacy.show(); QVERIFY(QTest::qWaitForWindowExposed(&legacy));
+            QTRY_VERIFY(legacy.m_editorDock->isVisible()); legacy.m_dirty=false;
+        }
+    }
+
+    void windowMenuRestoresClosedPanels() {
+        MainWindow w; w.resize(1200,800); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        auto* menu=w.findChild<QMenu*>("WindowMenu"); QVERIFY(menu);
+        for (const char* name : {"Window/Project","Window/Sources","Window/Timeline","Window/Notes","Window/MotionGraph",
+                                 "Window/Tracking","Window/Console","Window/Tools","Window/ClipBar","Window/ScrubBar","Window/Transport"})
+            QVERIFY2(w.findChild<QAction*>(name),name);
+        w.m_projectPanel->hide(); w.m_timelinePanel->hide(); w.m_leftSplit->hide(); w.m_toolStrip->hide();
+        w.findChild<QAction*>("Window/Project")->trigger();
+        QVERIFY(!w.m_projectPanel->isHidden()); QVERIFY(!w.m_leftSplit->isHidden());
+        w.findChild<QAction*>("Window/Tools")->trigger(); QVERIFY(!w.m_toolStrip->isHidden());
+        w.findChild<QAction*>("Window/Notes")->trigger(); QTRY_VERIFY(w.m_notesDock->isVisible());
+        w.setViewerOnly(true); QVERIFY(w.m_projectPanel->isHidden()); QVERIFY(!w.m_notesDock->isVisible());
+        w.setViewerOnly(false); QVERIFY(!w.m_projectPanel->isHidden()); QTRY_VERIFY(w.m_notesDock->isVisible());
+        w.resetLayout();
+        QVERIFY(!w.m_notesDock->isVisible()); QVERIFY(w.m_editorDock->isHidden()); QVERIFY(!w.m_timelinePanel->isHidden());
+        w.m_dirty=false;
+    }
+    void onionSkinBehavesLikeAnimationTools() {
+        MainWindow w; w.resize(1000,700); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        w.createCanvas("Onion",{160,90},40,24);
+        Source& s=w.m_project.sources.front();
+        Annotation a=rect(); for (int k : {0,4,8,12,16}) { a.x=.01*k; a.id=QString("k%1").arg(k); s.annotations[k]={a}; }
+        w.m_onion=true; w.m_onionMode=1; w.m_onionBefore=2; w.m_onionAfter=2; w.m_onionStep=4; w.m_onionTint=true;
+        w.m_onionVideoBefore=0; w.m_onionVideoAfter=0;
+        w.goToFrame(8);
+        QCOMPARE(w.m_view->m_ghosts.size(),4);                                 // keys 4, 0 before; 12, 16 after
+        QCOMPARE(w.m_view->m_ghosts[0].annotation.id,QString("k4"));
+        QCOMPARE(w.m_view->m_ghosts[0].tint,w.m_onionBeforeColor);
+        QVERIFY(w.m_view->m_ghosts[0].opacity>w.m_view->m_ghosts[1].opacity);  // nearest is strongest
+        QCOMPARE(w.m_view->m_ghosts[2].tint,w.m_onionAfterColor);
+        w.m_onionStep=1; w.goToFrame(9);                                       // held drawing is never ghosted over itself
+        QCOMPARE(w.m_view->m_ghosts.size(),1);                                 // frame 7 shows key 4; 8, 10, 11 hold the shown key
+        w.m_onionMode=0; w.m_onionBefore=1; w.m_onionAfter=1; w.m_onionVideoBefore=1; w.m_onionVideoAfter=1; w.m_onionStep=2;
+        w.goToFrame(20);
+        QCOMPARE(w.m_onionVideoFrames,QVector<int64_t>({18,22}));
+        QTRY_VERIFY_WITH_TIMEOUT(w.m_view->m_ghostInfo.size()==2,5000);
+        QCOMPARE(w.m_view->m_ghostInfo[0].tint,w.m_onionBeforeColor);
+        QCOMPARE(w.m_view->m_ghostInfo[1].tint,w.m_onionAfterColor);
+        w.m_onionTint=false; w.refreshAnnotations();
+        QVERIFY(!w.m_view->m_ghostInfo[0].tint.isValid()); QVERIFY(!w.m_view->m_ghosts.front().tint.isValid());
+        w.m_playing=true; w.refreshAnnotations(); QVERIFY(w.m_view->m_ghosts.isEmpty());   // hidden while playing by default
+        w.m_onionWhilePlaying=true; w.refreshAnnotations(); QVERIFY(!w.m_view->m_ghosts.isEmpty());
+        w.m_playing=false; w.m_onionTint=true; w.refreshAnnotations();
+        QTimer::singleShot(80,[&] { QVERIFY(w.m_onionMenu->grab().save(QApplication::applicationDirPath()+"/qa-onion-settings.png")); w.m_onionMenu->close(); });
+        w.m_onionMenu->exec(w.mapToGlobal(QPoint(80,80)));
+        w.m_dirty=false;
+    }
+    void playOnTwosAndThrees() {
+        MainWindow w; w.createCanvas("Twos",{64,48},48,24);
+        w.m_stepEvery=2; QCOMPARE(w.steppedFrameFor(7),int64_t(6)); QCOMPARE(w.steppedFrameFor(8),int64_t(8));
+        w.m_stepEvery=3; QCOMPARE(w.steppedFrameFor(8),int64_t(6));
+        w.m_stepEvery=0;
+        w.playOnNs(2); QVERIFY(w.m_playing); QVERIFY(w.m_stepped); QCOMPARE(w.m_stepEvery,2);
+        QTest::qWait(400); QCOMPARE(w.m_current%2,int64_t(0));
+        w.stopPlayback(); QCOMPARE(w.m_stepEvery,0); QVERIFY(!w.m_stepped);
+        w.m_dirty=false;
+    }
+    void iconsShareOneSize() {
+        QImage sheet(16*56,int((Icons::names().size()+15)/16)*56,QImage::Format_ARGB32_Premultiplied); sheet.fill(QColor(0x26,0x26,0x24));
+        QPainter p(&sheet); int i=0; QStringList report;
+        for (const QString& name : Icons::names()) {
+            const QPixmap pm=Icons::pixmap(name,Qt::white,48,1.0);
+            const QImage img=pm.toImage();
+            int l=48,t=48,r=-1,b=-1;
+            for (int y=0;y<48;++y) for (int x=0;x<48;++x) if (qAlpha(img.pixel(x,y))>24) { l=std::min(l,x); r=std::max(r,x); t=std::min(t,y); b=std::max(b,y); }
+            const double side=std::max(r-l+1,b-t+1)*24.0/48.0, cx=(l+r+1)/2.0*24/48, cy=(t+b+1)/2.0*24/48;
+            report << QString("%1 %2").arg(name).arg(side,0,'f',1);
+            QVERIFY2(side>=12.5 && side<=18.5,qPrintable(QString("%1 is %2 units").arg(name).arg(side)));
+            QVERIFY2(std::abs(cx-12)<=0.75 && std::abs(cy-12)<=0.75,qPrintable(QString("%1 is off-centre").arg(name)));
+            p.drawPixmap((i%16)*56+4,(i/16)*56+4,pm); p.setPen(QColor(255,255,255,40)); p.drawRect((i%16)*56+4,(i/16)*56+4,47,47); ++i;
+        }
+        p.end(); QVERIFY(sheet.save(QApplication::applicationDirPath()+"/qa-icons.png"));
+        qInfo().noquote() << "icon sizes:" << report.join(", ");
+    }
+    void motionAnalysisFindsStopsAndExtremes() {
+        std::map<int,QPointF> points;
+        for (int f=0; f<=32; ++f) {                       // a ball thrown up, landing at 24, resting after
+            const double t=std::min(f,24);
+            points[f]=QPointF(.1+.02*t,.8-.0055*t*(24-t));
+        }
+        const auto a=MotionGraph::analyze(points,QSizeF(1000,1000));
+        auto near=[&](int f,int tolerance) { for (int k : a.keys) if (std::abs(k-f)<=tolerance) return true; return false; };
+        QVERIFY(near(0,0)); QVERIFY2(near(12,1),"apex"); QVERIFY2(near(24,2),"landing");
+        QVERIFY(a.maxSpeed>0); QVERIFY(a.distance>0);
+        MainWindow w; w.resize(1300,860); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        w.createCanvas("Bounce",{640,360},40,24);
+        Track t; t.id="ball"; t.name="Ball"; t.color=Track::colorFor(0); t.createdFrame=0; t.points=points; t.keys={0};
+        w.m_project.sources.front().tracks={t}; w.m_selectedTrackId="ball";
+        w.findChild<QAction*>("Window/MotionGraph")->trigger(); QTRY_VERIFY(w.m_graphDock->isVisible());
+        w.goToFrame(12); QTest::qWait(150);
+        const auto inWindow=MotionGraph::analyze(points,QSizeF(640,360));
+        QCOMPARE(w.m_graph->analysis().keys,inWindow.keys);
+        QVERIFY(w.grab().save(QApplication::applicationDirPath()+"/qa-motion-graph.png"));
+        emit w.m_graph->bookmarkRequested(inWindow.keys);
+        QCOMPARE(int(w.m_project.sources.front().bookmarks.size()),int(inWindow.keys.size()));
+        w.m_dirty=false;
+    }
+    void frameNotesUndoAndExport() {
+        MainWindow w; w.resize(1200,800); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        w.createCanvas("Notes",{160,90},30,24);
+        const QString id=w.m_project.sources.front().id;
+        w.findChild<QAction*>("Window/Notes")->trigger(); QTRY_VERIFY(w.m_notesDock->isVisible());
+        w.goToFrame(7); w.m_noteEdit->setPlainText("Anticipation needs 2 more frames"); w.goToFrame(9);   // moving commits the typed note
+        QCOMPARE(w.m_project.find(id)->notes.at(7),QString("Anticipation needs 2 more frames"));
+        QCOMPARE(w.m_notesTree->topLevelItemCount(),1);
+        w.undo(); QVERIFY(!w.m_project.find(id)->notes.count(7)); w.redo(); QVERIFY(w.m_project.find(id)->notes.count(7));
+        QCOMPARE(w.m_noteEdit->toPlainText(),QString("Anticipation needs 2 more frames"));   // editor follows undo / redo
+        const QString path=temp.filePath("notes.frvm"); QString error; QVERIFY(w.m_project.save(path,&error));
+        Project loaded; QVERIFY(loaded.load(path,&error)); QCOMPARE(loaded.sources.front().notes.at(7),QString("Anticipation needs 2 more frames"));
+        w.goToFrame(7); QTest::qWait(60);
+        QVERIFY(w.grab().save(QApplication::applicationDirPath()+"/qa-frame-notes.png"));
+        w.m_dirty=false;
+    }
+    void mcpServerProtocolAndTools() {
+        MainWindow w; w.resize(1000,700); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        QVERIFY(w.m_mcp);
+        auto call=[&](const QString& method,const QJsonObject& params) {
+            return w.m_mcp->handle(QJsonObject{{"jsonrpc","2.0"},{"id",7},{"method",method},{"params",params}});
+        };
+        const QJsonObject init=call("initialize",{{"protocolVersion","2025-06-18"},{"capabilities",QJsonObject()},{"clientInfo",QJsonObject{{"name","qa"},{"version","1"}}}});
+        QCOMPARE(init["result"].toObject()["protocolVersion"].toString(),QString("2025-06-18"));
+        QCOMPARE(init["id"].toInt(),7);
+        QVERIFY(w.m_mcp->handle(QJsonObject{{"jsonrpc","2.0"},{"method","notifications/initialized"}}).isEmpty());
+        const QJsonArray tools=call("tools/list",{})["result"].toObject()["tools"].toArray();
+        QVERIFY(tools.size()>=20);
+        for (const QJsonValue& t : tools) QCOMPARE(t.toObject()["inputSchema"].toObject()["type"].toString(),QString("object"));
+        auto tool=[&](const QString& name,const QJsonObject& args) { return call("tools/call",{{"name",name},{"arguments",args}})["result"].toObject(); };
+        QVERIFY(tool("get_frame_image",{})["isError"].toBool());               // no media yet
+        const QJsonObject opened=tool("open_media",{{"paths",QJsonArray{QApplication::applicationDirPath()+"/qa-yuv-quads.mp4"}}});
+        QVERIFY2(!opened["isError"].toBool(),qPrintable(QJsonDocument(opened).toJson()));
+        const QJsonObject image=tool("get_frame_image",{{"frame",3},{"max_size",160}});
+        QVERIFY2(!image["isError"].toBool(),qPrintable(QJsonDocument(image).toJson()));
+        const QJsonObject part=image["content"].toArray()[0].toObject(); QCOMPARE(part["type"].toString(),QString("image"));
+        QImage png; QVERIFY(png.loadFromData(QByteArray::fromBase64(part["data"].toString().toLatin1()),"PNG"));
+        QCOMPARE(png.width(),160); QVERIFY(png.pixelColor(40,22).red()>200);
+        QVERIFY(!tool("add_annotation",{{"type","arrow"},{"frame",5},{"x",.1},{"y",.1},{"x2",.4},{"y2",.4},{"color","#00ff00"}})["isError"].toBool());
+        QCOMPARE(int(w.m_project.sources.front().annotations.count(5)),1);
+        QVERIFY(!tool("notes",{{"action","set"},{"frame",5},{"text","Hold this pose 2 more frames"}})["isError"].toBool());
+        QCOMPARE(w.m_project.sources.front().notes.at(5),QString("Hold this pose 2 more frames"));
+        const QJsonObject state=tool("get_state",{})["structuredContent"].toObject();
+        QCOMPARE(state["frame"].toInt(),5); QCOMPARE(state["clip"].toObject()["note"].toString(),QString("Hold this pose 2 more frames"));
+        QVERIFY(!tool("timeline",{{"action","list"}})["isError"].toBool());
+        QVERIFY(!tool("set_onion",{{"enabled",true},{"video_before",2},{"step",2}})["isError"].toBool()); QVERIFY(w.m_onion); QCOMPARE(w.m_onionStep,2);
+        const QString png2=temp.filePath("ai-frame.png");
+        QVERIFY(!tool("export_frame",{{"path",png2},{"frame",5}})["isError"].toBool()); QVERIFY(QImage(png2).width()==320);
+        QVERIFY(tool("export_frame",{{"path",png2},{"frame",6}})["isError"].toBool());                     // never overwrites silently
+        QVERIFY(!tool("export_frame",{{"path",png2},{"frame",6},{"overwrite",true}})["isError"].toBool());
+        QVERIFY(tool("unknown_tool",{})["isError"].toBool());
+        QCOMPARE(call("bogus/method",{})["error"].toObject()["code"].toInt(),-32601);
+        w.undo(); QVERIFY(!w.m_project.sources.front().notes.count(5));     // AI edits are undoable
+        QVERIFY(McpServer::configJson().contains("charonos-mcp.exe"));
+        w.m_dirty=false;
+    }
+    void shortcutsWindowAndPropertiesAreSafe() {
+        MainWindow w; w.resize(1100,800); w.createCanvas("Keys",{64,48},24,24);
+        bool seen=false;
+        QTimer::singleShot(120,[&] {
+            auto* d=qobject_cast<QDialog*>(QApplication::activeModalWidget()); QVERIFY(d);
+            QCOMPARE(d->objectName(),QString("ShortcutsDialog"));
+            seen=true;
+            QVERIFY(d->grab().save(QApplication::applicationDirPath()+"/qa-shortcuts.png"));
+            auto* search=d->findChild<QLineEdit*>("ShortcutSearch"); QVERIFY(search); search->setText("split");
+            QTest::qWait(30); QVERIFY(d->grab().save(QApplication::applicationDirPath()+"/qa-shortcuts-search.png"));
+            d->accept();
+        });
+        w.showShortcuts(); QVERIFY(seen);
+        // Editing the FPS in Properties rebuilds the panel from that box's own signal (crashed before 1.0).
+        w.m_tabs->setCurrentIndex(1);
+        auto* spin=w.m_props->findChild<QDoubleSpinBox*>(); QVERIFY(spin);
+        spin->setValue(12); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        QCOMPARE(w.viewFps(),12.0); QVERIFY(w.m_props->findChild<QDoubleSpinBox*>());
+        w.m_dirty=false;
+    }
+    void timelineEngineOverwriteRippleAndLayers() {
+        const QHash<QString,int64_t> lengths{{"a",48},{"b",24},{"c",30}};
+        const tl::LengthFn len=[&](const QString& id) { return lengths.value(id); };
+        TimelineDoc doc; doc.clips<<TimelineClip::of("a")<<TimelineClip::of("b");
+        tl::normalize(doc,len);
+        const QString a=doc.clips[0].uid, b=doc.clips[1].uid;
+        QCOMPARE(tl::span(*doc.clip(b),len).start,int64_t(48));                      // 1.0 clips land back to back
+        QCOMPARE(tl::duration(doc,len),int64_t(72));
+        // gap-preserving move: an empty stretch opens and stays
+        QVERIFY(tl::moveOverwrite(doc,{b},10,0,0,false,len));
+        QCOMPARE(tl::span(*doc.clip(b),len).start,int64_t(58));
+        const auto gap=tl::gapAt(doc,tl::Kind::Video,0,50,len); QCOMPARE(gap.first,int64_t(48)); QCOMPARE(gap.second,int64_t(58));
+        const Sequence seq=tl::primary(doc,len,{});
+        QCOMPARE(seq.total,int64_t(82)); QCOMPARE(seq.segments.size(),3); QVERIFY(seq.segments[1].isGap()); QVERIFY(!seq.at(50)->clipId.size());
+        TimelineDoc closed=doc; QVERIFY(tl::closeGap(closed,tl::Kind::Video,0,50,len)); QCOMPARE(tl::span(*closed.clip(b),len).start,int64_t(48));
+        // overwrite: dropping b back over a trims a's tail
+        QVERIFY(tl::moveOverwrite(doc,{b},-20,0,0,false,len));
+        QCOMPARE(tl::span(*doc.clip(a),len).count,int64_t(38)); QCOMPARE(doc.clip(a)->out,37);
+        // ripple insert pushes and cuts the clip under the insertion point
+        TimelineDoc ins=doc; QVERIFY(tl::insertClips(ins,{TimelineClip::of("c")},10,0,0,true,len));
+        QCOMPARE(tl::duration(ins,len),int64_t(92)); QCOMPARE(ins.videoClipCount(),4);
+        // lift leaves the gap, ripple delete closes it
+        TimelineDoc lift=doc; QVERIFY(tl::remove(lift,{a},false,len)); QCOMPARE(tl::span(*lift.clip(b),len).start,int64_t(38));
+        TimelineDoc rip=doc; QVERIFY(tl::remove(rip,{a},true,len)); QCOMPARE(tl::span(*rip.clip(b),len).start,int64_t(0));
+        // trims: normal trims stop at the neighbour, ripple trims push it
+        TimelineDoc t=doc;
+        QCOMPARE(tl::clampTrim(t,{a},1,5,false,len),int64_t(0));
+        QVERIFY(tl::trim(t,{a},1,5,true,len)); QCOMPARE(tl::span(*t.clip(b),len).start,int64_t(43));
+        QVERIFY(tl::trim(t,{b},-1,4,false,len)); QCOMPARE(tl::span(*t.clip(b),len).start,int64_t(47)); QCOMPARE(t.clip(b)->in,4);
+        // cuts keep picture and sound linked, head with head and tail with tail
+        TimelineDoc linked;
+        { TimelineClip v=TimelineClip::of("a"), s=TimelineClip::of("a",TimelineClip::Kind::Audio); v.link=s.uid; s.link=v.uid; linked.clips<<v<<s; }
+        tl::normalize(linked,len);
+        QStringList tails; QVERIFY(tl::split(linked,tl::withLinks(linked,{linked.clips[0].uid}),20,len,&tails)); QCOMPARE(tails.size(),2);
+        const TimelineClip* vt=linked.clip(tails[0]); QVERIFY(vt && linked.clip(vt->link)); QCOMPARE(linked.clip(vt->link)->link,vt->uid);
+        // tracks: a picture-in-picture inset on V2 leaves V1 editable; layers come bottom first
+        TimelineDoc mt; TimelineClip base=TimelineClip::of("a"), pip=TimelineClip::of("b");
+        base.start=0; pip.track=1; pip.start=10; pip.scale=0.3; mt.clips<<base<<pip; tl::normalize(mt,len);
+        QCOMPARE(tl::primary(mt,len,{}).at(15)->clipId,base.uid);
+        const auto layers=tl::layersAt(mt,15,len,{}); QCOMPARE(layers.size(),2); QCOMPARE(layers[0].clip->uid,base.uid); QCOMPARE(layers[1].local,int64_t(5));
+        mt.clip(pip.uid)->scale=1.0; QCOMPARE(tl::primary(mt,len,{}).at(15)->clipId,pip.uid);     // full frame on top wins
+        mt.videoTracks[1].visible=false; QCOMPARE(tl::primary(mt,len,{}).at(15)->clipId,base.uid); // hidden track
+        // ripple move = reorder at a clip boundary
+        TimelineDoc ro; ro.clips<<TimelineClip::of("a")<<TimelineClip::of("b")<<TimelineClip::of("c"); tl::normalize(ro,len);
+        const QString rc=ro.clips[2].uid;
+        QCOMPARE(tl::insertionPoint(ro,{rc},tl::Kind::Video,0,5,len),int64_t(0));
+        QVERIFY(tl::moveInsert(ro,{rc},0,0,0,len)); QCOMPARE(tl::span(*ro.clip(rc),len).start,int64_t(0)); QCOMPARE(tl::duration(ro,len),int64_t(102));
+        QVERIFY(tl::swapNeighbour(ro,rc,1,len)); QCOMPARE(tl::span(*ro.clip(rc),len).start,int64_t(48));
+        QCOMPARE(tl::editPoints(ro,len),QVector<int64_t>({0,48,78,102}));
+        // duplicate with Alt-drag semantics: originals stay, copies get new uids
+        TimelineDoc dup=ro; QStringList made; QVERIFY(tl::moveOverwrite(dup,{rc},100,0,0,true,len,&made));
+        QCOMPARE(made.size(),1); QVERIFY(dup.clip(rc)); QCOMPARE(tl::span(*dup.clip(made[0]),len).start,int64_t(148));
+        // locked tracks don't move
+        TimelineDoc lk=ro; lk.videoTracks[0].locked=true; QVERIFY(!tl::moveOverwrite(lk,{rc},5,0,0,false,len));
+    }
+
+    void projectV7RoundTripAndLegacyTimeline() {
+        Project p; Source s; s.id="s1"; s.media.kind=MediaRef::Kind::Canvas; s.media.width=64; s.media.height=48; s.media.fileName="Canvas"; s.frameCount=30; s.fps=24;
+        p.sources<<s;
+        TimelineClip v=TimelineClip::of("s1"); v.start=12; v.track=1; v.opacity=0.5; v.blend=BlendMode::Difference; v.scale=0.4; v.posX=0.2; v.posY=-0.1;
+        v.color=QColor("#5cae63"); v.name="Pose"; v.enabled=false;
+        TimelineClip a=TimelineClip::of("s1",TimelineClip::Kind::Audio); a.start=12; a.gainDb=-6; a.muted=true; a.fadeIn=3; a.fadeOut=4; a.track=0;
+        a.link=v.uid; v.link=a.uid;
+        p.timeline.clips<<v<<a;
+        p.timeline.videoTracks<<TrackState{"Overlay",true,true};
+        p.timeline.audioTracks[0].solo=true; p.timeline.audioTracks[0].gainDb=-3;
+        p.timeline.noteTracks<<TrackState{}; p.timeline.noteTracks[1].visible=false;
+        p.timeline.width=1280; p.timeline.height=720;
+        const QString path=temp.filePath("v7.frvm"); QString error; QVERIFY2(p.save(path,&error),qPrintable(error));
+        QFile f(path); QVERIFY(f.open(QIODevice::ReadOnly));
+        const QJsonObject root=QJsonDocument::fromJson(f.readAll()).object(); f.close();
+        QCOMPARE(root["version"].toInt(),7);
+        const QJsonObject tl0=root["timelines"].toArray()[0].toObject();
+        QCOMPARE(tl0["clips"].toArray().size(),1); QCOMPARE(tl0["audioClips"].toArray().size(),1);   // builds before 1.1 only see the picture
+        Project q; QVERIFY(q.load(path,&error));
+        QVERIFY(!q.timeline.linkAudioOnOpen);
+        QCOMPARE(q.timeline.clips.size(),2);
+        const TimelineClip* qv=q.timeline.clip(v.uid); const TimelineClip* qa=q.timeline.clip(a.uid); QVERIFY(qv && qa);
+        QCOMPARE(*qv,v); QCOMPARE(*qa,a);
+        QCOMPARE(q.timeline.videoTracks.size(),2); QCOMPARE(q.timeline.videoTracks[1].name,QString("Overlay")); QVERIFY(q.timeline.videoTracks[1].locked);
+        QVERIFY(q.timeline.audioTracks[0].solo); QCOMPARE(q.timeline.audioTracks[0].gainDb,-3.0); QVERIFY(!q.timeline.noteTracks[1].visible);
+        QCOMPARE(q.timeline.width,1280); QCOMPARE(q.timeline.height,720);
+        // A 1.0 (v6) project: clips without positions play back to back, sound becomes linked clips on open.
+        QJsonObject legacy{{"format","FrameReview"},{"version",6},
+            {"sources",QJsonArray{QJsonObject{{"id","s1"},{"media",QJsonObject{{"type","canvas"},{"width",64},{"height",48},{"fileName","Old"}}},{"fps",24},{"frameCount",30}}}},
+            {"timelines",QJsonArray{QJsonObject{{"name","Old"},{"sources",QJsonArray{"s1","s1"}},
+                {"clips",QJsonArray{QJsonObject{{"uid","c1"},{"source","s1"},{"in",0},{"out",9}},QJsonObject{{"uid","c2"},{"source","s1"},{"in",20},{"out",-1}}}}}}}};
+        const QString old=temp.filePath("old.frvm"); QFile o(old); QVERIFY(o.open(QIODevice::WriteOnly)); o.write(QJsonDocument(legacy).toJson()); o.close();
+        Project r; QVERIFY(r.load(old,&error));
+        QVERIFY(r.timeline.linkAudioOnOpen); QCOMPARE(r.timeline.clips.size(),2); QCOMPARE(r.timeline.clips[0].start,qint64(-1));
+        tl::normalize(r.timeline,[](const QString&) { return int64_t(30); });
+        QCOMPARE(r.timeline.clip("c2")->start,qint64(10));                                    // right after c1 (10 frames)
+        QCOMPARE(tl::duration(r.timeline,[](const QString&) { return int64_t(30); }),int64_t(20));
+        // The window opens it the same way.
+        MainWindow w; QVERIFY(w.loadProject(old));
+        QCOMPARE(w.m_seq.total,int64_t(20)); QCOMPARE(w.m_project.timeline.clip("c2")->start,qint64(10));
+        w.m_dirty=false;
+    }
+
+    void annotationClipsMoveTrimSplitDuplicateAndLanes() {
+        auto stroke=[](const QString& id) { Annotation a; a.id=id; a.type="stroke"; a.points={{.1,.1},{.2,.2}}; a.color=Qt::red; return a; };
+        auto text=[](const QString& id) { Annotation a; a.id=id; a.type="text"; a.text="Arc!"; a.x=.5; a.y=.5; a.color=Qt::yellow; return a; };
+        Source s; s.id="n"; s.frameCount=40;
+        s.annotations[0]={stroke("s1"),stroke("s2")};
+        s.annotations[10]={text("t1")};
+        s.annotations[20]={};
+        QVector<NoteClip> cl=notes::clips(s,40);
+        QCOMPARE(cl.size(),2);
+        const NoteClip draw=*std::find_if(cl.begin(),cl.end(),[](const NoteClip& n) { return n.kind=="draw"; });
+        const NoteClip txt=*std::find_if(cl.begin(),cl.end(),[](const NoteClip& n) { return n.kind=="text"; });
+        QCOMPARE(draw.first,0); QCOMPARE(draw.last,9); QCOMPARE(draw.ids.size(),2); QCOMPARE(draw.icon,QString("pencil")); QCOMPARE(draw.lane,0);
+        QCOMPARE(txt.first,10); QCOMPARE(txt.last,19); QCOMPARE(txt.icon,QString("text")); QCOMPARE(txt.label,QString("Arc!"));
+        // move the text later: it shows only there now
+        QVERIFY(notes::move(s,40,txt.key,25,0));
+        QVERIFY(s.renderable(15).isEmpty()); QCOMPARE(s.renderable(30).size(),1); QCOMPARE(s.renderable(30)[0].annotation->id,QString("t1"));
+        QVERIFY(s.renderable(35).isEmpty()); QCOMPARE(s.renderable(5).size(),2);
+        // trim the drawing to five frames
+        cl=notes::clips(s,40);
+        const QString drawKey=std::find_if(cl.begin(),cl.end(),[](const NoteClip& n) { return n.kind=="draw"; })->key;
+        QVERIFY(notes::trim(s,40,drawKey,0,4)); QVERIFY(s.renderable(7).isEmpty()); QCOMPARE(s.renderable(4).size(),2);
+        // cut the text clip: two clips, the second one with its own objects
+        cl=notes::clips(s,40);
+        const QString textKey=std::find_if(cl.begin(),cl.end(),[](const NoteClip& n) { return n.kind=="text"; })->key;
+        QString second; QVERIFY(notes::split(s,40,textKey,30,&second));
+        cl=notes::clips(s,40); QCOMPARE(cl.size(),3);
+        QCOMPARE(s.renderable(31)[0].annotation->text,QString("Arc!")); QVERIFY(s.renderable(31)[0].annotation->id!="t1");
+        // a copy over the original is stacked on the next lane and draws on top
+        cl=notes::clips(s,40);
+        const QString d2=std::find_if(cl.begin(),cl.end(),[](const NoteClip& n) { return n.kind=="draw"; })->key;
+        QString copy; QVERIFY(notes::duplicate(s,40,d2,2,&copy));
+        cl=notes::clips(s,40);
+        const NoteClip dup=*std::find_if(cl.begin(),cl.end(),[&](const NoteClip& n) { return n.key==copy; });
+        QCOMPARE(dup.lane,1); QCOMPARE(dup.first,2); QCOMPARE(dup.last,6);
+        const auto at3=s.renderable(3); QCOMPARE(at3.size(),4);
+        QVERIFY(dup.ids.contains(at3.back().annotation->id));                                     // higher lane = drawn last
+        // the lane can be chosen; the original keeps its own
+        QVERIFY(notes::move(s,40,copy,2,3)); cl=notes::clips(s,40);
+        QCOMPARE(std::find_if(cl.begin(),cl.end(),[&](const NoteClip& n) { return n.key==copy; })->lane,3);
+        // colour label, delete
+        QVERIFY(notes::setColor(s,40,copy,QColor("#4cb05c"),false));
+        cl=notes::clips(s,40); QCOMPARE(std::find_if(cl.begin(),cl.end(),[&](const NoteClip& n) { return n.key==copy; })->color,QColor("#4cb05c"));
+        QVERIFY(notes::erase(s,40,{copy})); QCOMPARE(s.renderable(3).size(),2);
+        // a new stroke at an existing key joins the clip drawn there
+        Annotation more=stroke("s3"); notes::placeNew(s,40,0,more,true); s.annotations[0].append(more);
+        cl=notes::clips(s,40); const NoteClip joined=*std::find_if(cl.begin(),cl.end(),[](const NoteClip& n) { return n.kind=="draw" && n.first==0; });
+        QCOMPARE(joined.ids.size(),3);
+        // 1.0 compatibility: the result is still plain keys with lanes kept in unknown-to-1.0 fields
+        const QJsonArray json=annotationsToJson(s.annotations.begin()->second);
+        QVERIFY(json[0].toObject().contains("clip")); QVERIFY(json[0].toObject().contains("lane"));
+    }
+
+    void multiTrackViewerCompositesAndGaps() {
+        MainWindow w; w.resize(1200,820); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        w.setOnion(false);  // an earlier test leaves onion skin on (saved setting); ghosts would tint the pixels
+        const QString dir=QApplication::applicationDirPath();
+        w.importPaths({dir+"/qa-silhouette.mp4"}); w.importPaths({dir+"/qa-blue-tone.mp4"});
+        QCOMPARE(w.m_project.sources.size(),2);
+        const QString sil=w.m_project.sources[0].id, blue=w.m_project.sources[1].id;
+        w.setSolo(QString());
+        QCOMPARE(w.m_project.timeline.videoClipCount(),2);
+        const QString blueClip=videoClipOf(w,blue);
+        const TimelineClip* bc=w.m_project.timeline.clip(blueClip); QVERIFY(bc && !bc->link.isEmpty());       // its sound came along, linked
+        QVERIFY(w.m_project.timeline.clip(bc->link)->isAudio()); QCOMPARE(w.m_project.timeline.clip(bc->link)->start,bc->start);
+        // V2 picture-in-picture over V1 (top right, 35%)
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { return tl::moveOverwrite(d,tl::withLinks(d,{blueClip}),10-48,1,0,false,w.lengthFn()); }));
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { TimelineClip* c=d.clip(blueClip); c->scale=0.35; c->posX=0.3; c->posY=-0.3; return true; }));
+        QCOMPARE(w.m_seq.total,int64_t(48));
+        w.goToFrame(20);
+        QTRY_VERIFY_WITH_TIMEOUT(w.m_view->m_a.frame && w.m_view->m_above.size()==1 && w.m_view->m_above[0].tex.frame,10000);
+        QCOMPARE(w.locate(20).source->id,sil);                                                   // the full frame stays the edited picture
+        QCOMPARE(w.m_view->mediaSize(),QSize(320,180));
+        QTest::qWait(80);
+        QVERIFY(w.m_view->grab().save(dir+"/qa-multitrack-pip.png"));
+        QVERIFY2(near(viewPixel(*w.m_view,{256,36}),QColor(0x20,0x60,0xC0),40),qPrintable(viewPixel(*w.m_view,{256,36}).name()));  // V2 on top
+        QVERIFY(near(viewPixel(*w.m_view,{40,160}),QColor(0xD8,0xD0,0xC0),30));                 // V1 elsewhere
+        QVERIFY(w.m_view->grab().save(dir+"/qa-multitrack-pip.png"));
+        // Difference blend, full frame: |blue - beige| everywhere outside the moving block
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { TimelineClip* c=d.clip(blueClip); c->scale=1; c->posX=c->posY=0; c->blend=BlendMode::Difference; return true; }));
+        w.goToFrame(21);
+        QCOMPARE(w.locate(21).source->id,blue);                                                  // full frame on top is edited now
+        QTRY_VERIFY_WITH_TIMEOUT(w.m_view->m_a.frame && w.m_view->m_below.size()==1 && w.m_view->m_below[0].tex.frame,10000);
+        QTest::qWait(80);
+        QVERIFY2(near(viewPixel(*w.m_view,{300,170}),QColor(0xB8,0x70,0x00),40),qPrintable(viewPixel(*w.m_view,{300,170}).name()));
+        QVERIFY(w.m_view->grab().save(dir+"/qa-multitrack-difference.png"));
+        // Hide V2: V1 alone again
+        w.setTrackState(0,1,TrackState{QString(),false});
+        QCOMPARE(w.locate(21).source->id,sil);
+        w.setTrackState(0,1,TrackState{});
+        // Gaps: lift V1, the first ten frames are empty and black
+        const QString silClip=videoClipOf(w,sil);
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { return tl::remove(d,{silClip},false,w.lengthFn()); }));
+        QCOMPARE(w.m_seq.total,int64_t(34)); QVERIFY(w.m_seq.at(5)->isGap());
+        w.goToFrame(5);
+        QCOMPARE(w.m_current,int64_t(5)); QVERIFY(!w.m_view->m_a.frame); QCOMPARE(w.m_timeline->currentFrame(),qint64(5));
+        w.goToFrame(12); QTRY_VERIFY_WITH_TIMEOUT(w.m_view->m_a.frame!=nullptr,10000);
+        // Only the inset is left: it is the edited picture, and its annotations follow its transform.
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { TimelineClip* c=d.clip(blueClip); c->scale=0.35; c->posX=0.3; c->posY=-0.3; c->blend=BlendMode::Normal; return true; }));
+        w.goToFrame(12);
+        QCOMPARE(w.m_view->primaryRect(),QRectF(200,4.5,112,63));
+        const QPointF a0=w.m_view->annoToWidget(0).map(QPointF(0,0)), c0=w.m_view->mediaToWidget().map(QPointF(200,4.5));
+        QVERIFY(std::abs(a0.x()-c0.x())<0.5 && std::abs(a0.y()-c0.y())<0.5);
+        QCOMPARE(w.m_view->layerMedia(0),QSize(320,180));
+        w.undo();
+        w.undo(); QCOMPARE(w.m_seq.total,int64_t(48)); QVERIFY(!w.m_seq.at(5)->isGap());
+        w.m_dirty=false;
+    }
+
+    void sourceTreeDragCopiesToTimelineAndUndo() {
+        MainWindow w; w.resize(1400,900); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        const QString dir=QApplication::applicationDirPath();
+        w.importPaths({dir+"/qa-media.mp4"});
+        const auto ids=w.importPaths({dir+"/qa-blue-tone.mp4",dir+"/qa-audio-loop.mp4"},false);
+        QCOMPARE(ids.size(),2);
+        w.setSolo(QString()); showEditor(w); w.m_editor->setSnap(true); w.m_editor->setRipple(false);
+        QVERIFY(w.m_tree->dragEnabled()); QCOMPARE(w.m_tree->dragDropMode(),QAbstractItemView::DragDrop);
+        QCOMPARE(w.m_tree->defaultDropAction(),Qt::CopyAction);
+        QModelIndexList indices;
+        for (const QString& id : ids)
+            for (QTreeWidgetItemIterator it(w.m_tree); *it; ++it)
+                if ((*it)->data(0,RoleKind).toString()=="source" && (*it)->data(0,RoleId).toString()==id)
+                    indices << w.m_tree->indexFromItem(*it);
+        QCOMPARE(indices.size(),2);
+        std::unique_ptr<QMimeData> mime(w.m_tree->model()->mimeData(indices));
+        QWidget* canvas=w.m_editor->canvas(); const QPoint pt=w.m_editor->trackPoint(0,0,24).toPoint();
+        auto sendDrop=[&] {
+            QDragEnterEvent enter(pt,Qt::CopyAction|Qt::MoveAction,mime.get(),Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(canvas,&enter); QVERIFY(enter.isAccepted());
+            QDragMoveEvent move(pt,Qt::CopyAction|Qt::MoveAction,mime.get(),Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(canvas,&move); QVERIFY(move.isAccepted()); QCOMPARE(move.dropAction(),Qt::CopyAction);
+            QDropEvent drop(pt,Qt::CopyAction|Qt::MoveAction,mime.get(),Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(canvas,&drop); QVERIFY(drop.isAccepted()); QCOMPARE(drop.dropAction(),Qt::CopyAction);
+        };
+        sendDrop(); QCOMPARE(w.m_project.timeline.videoClipCount(),3); QCOMPARE(w.m_project.sources.size(),3);
+        QCOMPARE(w.m_project.timeline.clip(videoClipOf(w,ids[0]))->start,qint64(24));
+        QCOMPARE(w.m_project.timeline.clip(videoClipOf(w,ids[1]))->start,qint64(48));
+        QCOMPARE(w.m_seq.total,int64_t(96));
+        w.undo(); QCOMPARE(w.m_project.timeline.videoClipCount(),1); QCOMPARE(w.m_project.sources.size(),3);
+        w.redo(); QCOMPARE(w.m_project.timeline.videoClipCount(),3);
+        TrackState locked; locked.locked=true; w.setTrackState(0,0,locked);
+        QDragEnterEvent enter(pt,Qt::CopyAction,mime.get(),Qt::LeftButton,Qt::NoModifier); QApplication::sendEvent(canvas,&enter);
+        QDragMoveEvent move(pt,Qt::CopyAction,mime.get(),Qt::LeftButton,Qt::NoModifier); QApplication::sendEvent(canvas,&move);
+        QVERIFY(!move.isAccepted()); QCOMPARE(w.m_project.timeline.videoClipCount(),3);
+        // The lower Sources tab uses QListWidget's payload and supports copying out too.
+        w.setTrackState(0,0,TrackState{});
+        QCOMPARE(w.m_clipList->dragDropMode(),QAbstractItemView::DragDrop);
+        mime.reset(w.m_clipList->model()->mimeData({w.m_clipList->model()->index(0,0)}));
+        const QPoint next=w.m_editor->trackPoint(0,0,96).toPoint();
+        QDragEnterEvent listEnter(next,Qt::CopyAction|Qt::MoveAction,mime.get(),Qt::LeftButton,Qt::NoModifier);
+        QApplication::sendEvent(canvas,&listEnter); QVERIFY(listEnter.isAccepted());
+        QDragMoveEvent listMove(next,Qt::CopyAction|Qt::MoveAction,mime.get(),Qt::LeftButton,Qt::NoModifier);
+        QApplication::sendEvent(canvas,&listMove); QVERIFY(listMove.isAccepted());
+        w.m_view->setFocus(); QTRY_VERIFY(w.m_view->hasFocus());
+        QDropEvent listDrop(next,Qt::CopyAction|Qt::MoveAction,mime.get(),Qt::LeftButton,Qt::NoModifier);
+        QApplication::sendEvent(canvas,&listDrop); QVERIFY(listDrop.isAccepted()); QCOMPARE(listDrop.dropAction(),Qt::CopyAction);
+        QCOMPARE(w.m_project.timeline.videoClipCount(),4); QCOMPARE(w.m_project.sources.size(),3);
+        QTRY_VERIFY(canvas->hasFocus());
+        QTest::keyClick(QApplication::focusWidget(),Qt::Key_Delete);
+        QCOMPARE(w.m_project.timeline.videoClipCount(),3);
+        w.undo(); QCOMPARE(w.m_project.timeline.videoClipCount(),4);
+        w.undo(); QCOMPARE(w.m_project.timeline.videoClipCount(),3);
+        w.m_editor->zoomToFit(); QTest::qWait(60);
+        QVERIFY(windowShot(w,dir+"/qa-source-drag-drop.png"));
+        w.m_dirty=false;
+    }
+
+    void mixedFpsTimelineKeepsDurationPitchAndEdits() {
+        MainWindow w;
+        const QString dir=QApplication::applicationDirPath();
+        w.importPaths({dir+"/qa-audio-loop.mp4"});
+        w.importPaths({dir+"/qa-60-tone.mp4"});
+        w.importPaths({dir+"/qa-30-tone.mp4"});
+        w.importPaths({dir+"/qa-2997-tone.mp4"});
+        w.setSolo(QString());
+        const QString id=w.m_project.sources[1].id, uid=videoClipOf(w,id);
+        QTRY_VERIFY_WITH_TIMEOUT(w.m_audioClips.count(id),15000);
+        const auto len=w.lengthFn(); const auto s=tl::span(*w.m_project.timeline.clip(uid),len);
+        QCOMPARE(s.start,int64_t(48)); QCOMPARE(s.count,int64_t(24)); QCOMPARE(s.last(),int64_t(59));
+        QCOMPARE(w.locate(60).local,int64_t(30)); QCOMPARE(w.visibleLayers(60).front().local,int64_t(30));
+        QCOMPARE(w.m_seq.total,int64_t(121)); // 2 s + 1 s + 1 s + 30/29.97 s (rounded up to 25 frames)
+        const auto seq=w.timelineSequence(); QCOMPARE(Sequence::globalIn(*seq.at(60),30),int64_t(60));
+        auto pitch=[&](const AudioMix& mix,double time) {
+            const int n=12000; std::vector<float> buf(n*2,0); mix.render(time,1.0/48000,n,buf.data());
+            int rises=0; for (int i=1;i<n;++i) if (buf[(i-1)*2]<=0 && buf[i*2]>0) ++rises;
+            return rises*48000.0/n;
+        };
+        QVERIFY(std::abs(pitch(*w.timelineMix(),2.2)-880)<8); // previously 352 Hz (24/60 speed)
+        QTRY_VERIFY_WITH_TIMEOUT(w.m_audioClips.count(w.m_project.sources[2].id) && w.m_audioClips.count(w.m_project.sources[3].id),15000);
+        QVERIFY(std::abs(pitch(*w.timelineMix(),3.2)-660)<8);
+        QVERIFY(std::abs(pitch(*w.timelineMix(),4.2)-550)<8);
+        const auto pair=tl::withLinks(w.m_project.timeline,{uid});
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { return tl::split(d,pair,55,w.lengthFn()); }));
+        const auto head=tl::span(*w.m_project.timeline.clip(uid),w.lengthFn()); QCOMPARE(head.count,int64_t(7));
+        QCOMPARE(w.locate(60).local,int64_t(30));
+        QVERIFY(std::abs(pitch(*w.timelineMix(),2.2)-880)<8); // crosses the fractional source-frame split
+        const QString saved=temp.filePath("mixed-rate.frvm"); QString error;
+        QVERIFY2(w.m_project.save(saved,&error),qPrintable(error)); Project loaded; QVERIFY(loaded.load(saved,&error));
+        QCOMPARE(loaded.timeline.clips,w.m_project.timeline.clips);
+        w.undo();
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { return tl::trim(d,pair,-1,5,false,w.lengthFn()); }));
+        const auto trimmed=tl::span(*w.m_project.timeline.clip(uid),w.lengthFn());
+        QCOMPARE(trimmed.count,int64_t(19)); QCOMPARE(trimmed.in,int64_t(12));
+        QVERIFY(std::abs(trimmed.timeStart-5.0/24)<1e-6);
+        QCOMPARE(w.locate(60).local,int64_t(30));
+        w.undo();
+        w.setViewFps(30); QCOMPARE(w.m_seq.total,int64_t(151));
+        QCOMPARE(w.m_project.timeline.clip(uid)->start,qint64(60)); QCOMPARE(w.locate(75).local,int64_t(30));
+        QVERIFY(std::abs(pitch(*w.timelineMix(),2.2)-880)<8);
+        w.undo(); QCOMPARE(w.m_project.timeline.fps,24.0); QCOMPARE(w.locate(60).local,int64_t(30));
+        w.m_dirty=false;
+    }
+
+    void mixedFpsExportPreservesToneAfterCut() {
+        MainWindow w; const QString dir=QApplication::applicationDirPath();
+        w.importPaths({dir+"/qa-audio-loop.mp4"}); w.importPaths({dir+"/qa-60-tone.mp4"}); w.setSolo(QString());
+        const QString first=w.m_project.sources[0].id, second=w.m_project.sources[1].id;
+        QTRY_VERIFY_WITH_TIMEOUT(w.m_audioClips.count(first) && w.m_audioClips.count(second),15000);
+        const QString uid=videoClipOf(w,second);
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { return tl::split(d,tl::withLinks(d,{uid}),55,w.lengthFn()); }));
+        ExportJob job; job.project=w.m_project; job.sequence=w.m_seq; job.first=0; job.last=71; job.fps=24;
+        job.format=ExportJob::Format::Mp4H264; job.output=dir+"/qa-mixed-fps-export.mp4";
+        job.timeline=true; job.canvas=w.canvasSize(); job.timelineFps=24; job.mix=w.timelineMix();
+        for (int64_t g=0;g<=job.last;++g) {
+            std::vector<ExportJob::Layer> frame;
+            for (const auto& p : w.visibleLayers(g)) frame.push_back({p.clip->sourceId,p.local,p.rect,p.clip->opacity,p.clip->blend,p.clip->uid==w.m_seq.at(g)->clipId});
+            job.layers.push_back(frame);
+        }
+        std::atomic<int64_t> done{0}; std::atomic<bool> cancel{false}; QString error;
+        QVERIFY2(runExport(job,done,cancel,&error),qPrintable(error)); QCOMPARE(done.load(),int64_t(72));
+        const auto out=AudioClip::decode(job.output,&error); QVERIFY2(out!=nullptr,qPrintable(error));
+        auto pitch=[&](double time) {
+            const int begin=int((time-out->startTime)*out->rate), n=12000; int rises=0;
+            for (int i=begin+1;i<begin+n;++i) if (out->pcm[size_t(i-1)*2]<=0 && out->pcm[size_t(i)*2]>0) ++rises;
+            return rises*out->rate/double(n);
+        };
+        QVERIFY(std::abs(pitch(.2)-440)<8); QVERIFY(std::abs(pitch(2.2)-880)<8);
+        QVERIFY(std::abs(out->duration()-3.0)<.06);
+        w.m_dirty=false;
+    }
+
+    void variableFpsUsesElapsedTimeAndExactSplit() {
+        auto info=std::make_shared<MediaInfo>(); info->frameCount=6; info->fps=6; info->variableFrameRate=true;
+        info->frameTimes={1.0,1.05,1.2,1.3,1.65,1.8};
+        SourceTiming t(6); t.info=info; t.fps=24;
+        const tl::LengthFn len=[t](const QString&) { return t; };
+        TimelineDoc d; TimelineClip c=TimelineClip::of("vfr"); c.start=0; d.clips<<c;
+        const auto s=tl::span(c,len); QCOMPARE(s.count,int64_t(24)); // 0.9667 s rounds up
+        const auto seq=tl::primary(d,len,{}); QCOMPARE(seq.at(7)->sourceFrame(7),int64_t(2));
+        QCOMPARE(tl::layersAt(d,7,len,{}).front().local,int64_t(2));
+        QVERIFY(tl::split(d,{c.uid},7,len)); QCOMPARE(tl::duration(d,len),int64_t(24));
+        QCOMPARE(tl::layersAt(d,8,len,{}).front().local,int64_t(3));
+        QVERIFY(std::abs(d.clips[0].sourceEnd-(1+7.0/24))<1e-6);
+    }
+
+    void timelineSoundMixGainMuteSoloFades() {
+        // The mixer on its own: constant 0.5 in, gain and fades out.
+        auto pcm=std::make_shared<AudioClip>(); pcm->pcm.assign(size_t(AudioClip::kRate)*2*2,16384); pcm->startTime=0;
+        AudioMix mix; mix.fps=24;
+        AudioMix::Item it; it.pcm=pcm; it.start=0; it.count=24; for (int k=0;k<=24;++k) it.times.push_back(k/24.0); it.gain=1.0;
+        mix.items.push_back(it);
+        std::vector<float> buf(4800*2,0.f); mix.render(0.5,1.0/48000,4800,buf.data()); QVERIFY(std::abs(buf[100]-0.5f)<0.01f);
+        mix.items[0].gain=dbToGain(-6.0206); std::fill(buf.begin(),buf.end(),0.f); mix.render(0.5,1.0/48000,4800,buf.data()); QVERIFY(std::abs(buf[100]-0.25f)<0.01f);
+        mix.items[0].gain=1.0; mix.items[0].fadeIn=12; std::fill(buf.begin(),buf.end(),0.f); mix.render(0.25,1.0/48000,1,buf.data()); QVERIFY(std::abs(buf[0]-0.25f)<0.02f);
+        std::fill(buf.begin(),buf.end(),0.f); mix.render(1.5,1.0/48000,10,buf.data()); QCOMPARE(buf[0],0.f);  // after the clip: silence
+        // In the window: sound clips, track mute / solo, clip gain, waveform peaks.
+        MainWindow w;
+        const QString dir=QApplication::applicationDirPath();
+        w.importPaths({dir+"/qa-audio-loop.mp4"}); w.importPaths({dir+"/qa-blue-tone.mp4"});
+        const QString loop=w.m_project.sources[0].id, tone=w.m_project.sources[1].id;
+        w.setSolo(QString());
+        QTRY_VERIFY_WITH_TIMEOUT(w.m_audioClips.count(loop) && w.m_audioClips.count(tone),15000);
+        QVERIFY(w.m_peaks.count(loop)); QCOMPARE(w.m_peaks.at(loop).size(),qsizetype(48*TimelineEditor::kPeakBins));
+        QVERIFY(*std::max_element(w.m_peaks.at(loop).begin(),w.m_peaks.at(loop).end())>0.2f);       // 440 Hz at 1/8 amplitude
+        QCOMPARE(int(w.timelineMix()->items.size()),2);
+        // the tone's sound on A2, independent of its picture
+        QString toneSound; for (const TimelineClip& c : w.m_project.timeline.clips) if (c.isAudio() && c.sourceId==tone) toneSound=c.uid;
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { return tl::moveOverwrite(d,{toneSound},-48,0,1,false,w.lengthFn()); }));
+        QCOMPARE(w.m_project.timeline.clip(toneSound)->track,1); QCOMPARE(w.m_project.timeline.clip(toneSound)->start,qint64(0));
+        QCOMPARE(w.m_project.timeline.clip(videoClipOf(w,tone))->start,qint64(48));            // the picture stayed
+        w.setTrackState(1,0,TrackState{QString(),false});                                       // mute A1
+        QCOMPARE(int(w.timelineMix()->items.size()),1);
+        w.setTrackState(1,0,TrackState{});
+        TrackState solo; solo.solo=true; w.setTrackState(1,1,solo);                             // solo A2
+        QCOMPARE(int(w.timelineMix()->items.size()),1); QCOMPARE(w.timelineMix()->items[0].pcm,std::shared_ptr<const AudioClip>(w.m_audioClips.at(tone)));
+        w.setTrackState(1,1,TrackState{});
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { d.clip(toneSound)->gainDb=-6; d.clip(toneSound)->muted=false; return true; }));
+        bool found=false; for (const auto& i : w.timelineMix()->items) if (i.pcm==w.m_audioClips.at(tone)) { found=true; QVERIFY(std::abs(i.gain-0.501)<0.01); }
+        QVERIFY(found);
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { d.clip(toneSound)->muted=true; return true; }));
+        QCOMPARE(int(w.timelineMix()->items.size()),1);
+        // Export: the mix is what is written.
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { d.clip(toneSound)->muted=false; return true; }));
+        ExportJob job; job.project=w.m_project; job.sequence=w.m_seq; job.first=0; job.last=w.m_seq.total-1; job.fps=24;
+        job.format=ExportJob::Format::Mp4H264; job.output=temp.filePath("mix.mp4"); job.audioClips=w.m_audioClips;
+        job.timeline=true; job.canvas=w.canvasSize(); job.timelineFps=24; job.mix=w.timelineMix();
+        for (int64_t g=job.first; g<=job.last; ++g) {
+            std::vector<ExportJob::Layer> frame;
+            for (const auto& p : w.visibleLayers(g)) frame.push_back({p.clip->sourceId,p.local,p.rect,p.clip->opacity,p.clip->blend,w.m_seq.at(g) && p.clip->uid==w.m_seq.at(g)->clipId});
+            job.layers.push_back(frame);
+        }
+        std::atomic<int64_t> done{0}; std::atomic<bool> cancel{false}; QString error;
+        QVERIFY2(runExport(job,done,cancel,&error),qPrintable(error));
+        const auto out=AudioClip::decode(job.output,&error); QVERIFY(out);
+        auto rms=[&](double t0,double t1) { double sum=0; int64_t n=0; for (int64_t i=int64_t(t0*48000); i<int64_t(t1*48000) && i<out->frames(); ++i,++n) sum+=std::pow(out->pcm[size_t(i)*2]/32768.0,2); return n? std::sqrt(sum/n):0.0; };
+        QVERIFY2(rms(0.1,0.9)>0.05,qPrintable(QString::number(rms(0.1,0.9))));                  // 440 Hz + 880 Hz under the first second
+        QVERIFY(rms(2.2,2.9)<0.2);                                                               // only the loop's tail remains (it ends at 2 s)
+        w.m_dirty=false;
+    }
+
+    void silhouetteFiltersCpuAndGpu() {
+        // CPU (export / verification): a dark block on a light background.
+        QImage frame(320,180,QImage::Format_RGB32); frame.fill(QColor(0xD8,0xD0,0xC0));
+        QPainter(&frame).fillRect(QRect(100,60,40,60),QColor(0x30,0x28,0x20));
+        AnalysisFilter f; f.mode=AnalysisFilter::Mode::Silhouette;
+        const double thr=analysis::otsu(frame); QVERIFY(thr>0.2 && thr<0.75);
+        QImage out=analysis::apply(frame,f,thr);
+        QVERIFY(near(out.pixelColor(120,90),f.ink,8)); QVERIFY(near(out.pixelColor(10,10),f.paper,8));
+        QVector<QImage> shots;
+        for (int x : {20,80,140,200,260}) { QImage s=frame.copy(); s.fill(QColor(0xD8,0xD0,0xC0)); QPainter(&s).fillRect(QRect(x,60,40,60),QColor(0x30,0x28,0x20)); shots<<s; }
+        const QImage plate=analysis::backgroundPlate(shots); QVERIFY(near(plate.pixelColor(110,90),QColor(0xD8,0xD0,0xC0),4));  // the walker is gone
+        f.mode=AnalysisFilter::Mode::MovingSilhouette; out=analysis::apply(frame,f,f.threshold(),plate);
+        QVERIFY(near(out.pixelColor(120,90),f.ink,8)); QVERIFY(near(out.pixelColor(250,30),f.paper,8));
+        f.mode=AnalysisFilter::Mode::Edges; out=analysis::apply(frame,f,f.threshold());
+        QVERIFY(near(out.pixelColor(100,90),f.ink,60)); QVERIFY(near(out.pixelColor(120,90),f.paper,8));
+        QImage prev=frame.copy(); prev.fill(QColor(0xD8,0xD0,0xC0)); QPainter(&prev).fillRect(QRect(96,60,40,60),QColor(0x30,0x28,0x20));
+        f.mode=AnalysisFilter::Mode::MotionHighlight; out=analysis::apply(frame,f,f.threshold(),prev);
+        QVERIFY(near(out.pixelColor(138,90),f.accent,40)); QVERIFY(!near(out.pixelColor(120,90),f.accent,60));
+        f.mode=AnalysisFilter::Mode::Notan; out=analysis::apply(frame,f,thr); QVERIFY(near(out.pixelColor(120,90),f.ink,4));
+        // GPU (viewer): the same picture through the shader.
+        MainWindow w; w.resize(1100,760); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        w.setOnion(false);
+        const QString dir=QApplication::applicationDirPath();
+        w.importPaths({dir+"/qa-silhouette.mp4"});
+        const QString id=w.m_project.sources[0].id;
+        w.goToFrame(24); QTRY_VERIFY_WITH_TIMEOUT(w.m_view->m_a.frame!=nullptr,10000);
+        w.setFilterMode(AnalysisFilter::Mode::Silhouette);
+        QTRY_VERIFY(w.m_otsu.contains(id));
+        QTest::qWait(60);
+        QVERIFY(w.m_view->grab().save(dir+"/qa-filter-silhouette.png"));
+        // block at frame 24: x = 20 + 100 * 1 s
+        QVERIFY2(near(viewPixel(*w.m_view,{140,90}),w.m_filter.ink,30),qPrintable(viewPixel(*w.m_view,{140,90}).name()));
+        QVERIFY2(near(viewPixel(*w.m_view,{30,20}),w.m_filter.paper,30),qPrintable(viewPixel(*w.m_view,{30,20}).name()));
+        QVERIFY(w.m_view->grab().save(dir+"/qa-filter-silhouette.png"));
+        w.setFilterMode(AnalysisFilter::Mode::MovingSilhouette);
+        QTRY_VERIFY_WITH_TIMEOUT(w.m_plates.contains(id),20000);
+        QTest::qWait(80);
+        QVERIFY2(near(viewPixel(*w.m_view,{140,90}),w.m_filter.ink,40),qPrintable(viewPixel(*w.m_view,{140,90}).name()));
+        QVERIFY2(near(viewPixel(*w.m_view,{280,160}),w.m_filter.paper,30),qPrintable(viewPixel(*w.m_view,{280,160}).name()));
+        QVERIFY(w.m_view->grab().save(dir+"/qa-filter-moving.png"));
+        w.setFilterMode(AnalysisFilter::Mode::MotionHighlight);
+        QTRY_VERIFY_WITH_TIMEOUT(w.m_view->m_aRef.frame!=nullptr,10000);
+        QTest::qWait(60);
+        QVERIFY2(near(viewPixel(*w.m_view,{158,90}),w.m_filter.accent,70),qPrintable(viewPixel(*w.m_view,{158,90}).name()));  // leading edge moved
+        QVERIFY(w.m_view->grab().save(dir+"/qa-filter-motion.png"));
+        w.setFilterMode(AnalysisFilter::Mode::Edges); QTest::qWait(60);
+        QVERIFY(w.m_view->grab().save(dir+"/qa-filter-edges.png"));
+        // Export with the filter burned in matches the viewer.
+        ExportJob job; job.project=w.m_project; job.sequence=w.m_seq; job.first=24; job.last=24; job.fps=24;
+        job.format=ExportJob::Format::PngSequence; job.output=temp.filePath("filter/frame");
+        w.setFilterMode(AnalysisFilter::Mode::Silhouette); job.filter=w.m_filter; job.filterThreshold=w.effectiveThreshold();
+        std::atomic<int64_t> done{0}; std::atomic<bool> cancel{false}; QString error;
+        QVERIFY2(runExport(job,done,cancel,&error),qPrintable(error));
+        const QImage png(temp.filePath("filter/frame_0000.png"));
+        QVERIFY(near(png.pixelColor(140,90),w.m_filter.ink,30)); QVERIFY(near(png.pixelColor(30,20),w.m_filter.paper,30));
+        w.setFilterMode(AnalysisFilter::Mode::None);
+        w.m_dirty=false;
+    }
+
+    void timelineDeleteUsesRealFocusAndRespectsNoteLocks() {
+        MainWindow w; w.resize(1400,950); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        w.activateWindow(); QTRY_VERIFY(w.isActiveWindow());
+        w.createCanvas("Delete A",{320,180},24,24); w.createCanvas("Delete B",{320,180},24,24); w.setSolo(QString());
+        const QString first=w.m_project.sources[0].id;
+        w.goToFrame(0); w.onAnnotationCreated(rect("delete-note"));
+        showEditor(w); w.m_editor->setRipple(false); w.m_editor->setSnap(false);
+        QWidget* canvas=w.m_editor->canvas();
+        const QString uid=videoClipOrder(w)[0], next=videoClipOrder(w)[1];
+        QTest::mouseClick(canvas,Qt::LeftButton,{},w.m_editor->clipPoint(uid,.5).toPoint());
+        QTRY_VERIFY(canvas->hasFocus()); QCOMPARE(w.m_editor->selectedClip(),uid);
+        QTest::keyClick(QApplication::focusWidget(),Qt::Key_Delete,Qt::KeypadModifier);
+        QVERIFY(!w.m_project.timeline.clip(uid)); QCOMPARE(w.m_project.timeline.clip(next)->start,qint64(24));
+        w.undo();
+        QTest::mouseClick(canvas,Qt::LeftButton,{},w.m_editor->clipPoint(uid,.5).toPoint());
+        // Menu/global Delete must use the same timeline context, even when invoked directly.
+        w.deleteContextual(); QVERIFY(!w.m_project.timeline.clip(uid)); w.undo();
+        QTest::mouseClick(canvas,Qt::LeftButton,{},w.m_editor->clipPoint(uid,.5).toPoint());
+        QTest::keyClick(QApplication::focusWidget(),Qt::Key_Delete,Qt::ShiftModifier);
+        QCOMPARE(w.m_project.timeline.clip(next)->start,qint64(0)); w.undo();
+        const auto note=notes::clips(*w.m_project.find(first),24).front();
+        auto clickNote=[&] { QTest::mouseClick(canvas,Qt::LeftButton,{},w.m_editor->notePoint(first,note.key,.5).toPoint()); };
+        clickNote(); QTRY_VERIFY(canvas->hasFocus()); QCOMPARE(w.m_editor->selectedNoteKey(),note.key);
+        TrackState locked; locked.locked=true; w.setTrackState(2,note.lane,locked);
+        QTest::keyClick(QApplication::focusWidget(),Qt::Key_Delete); QVERIFY(!notes::clips(*w.m_project.find(first),24).isEmpty());
+        w.setTrackState(2,note.lane,TrackState{}); clickNote();
+        QTest::keyClick(QApplication::focusWidget(),Qt::Key_Delete);
+        QVERIFY(notes::clips(*w.m_project.find(first),24).isEmpty()); QCOMPARE(w.m_project.timeline.videoClipCount(),2);
+        w.undo(); QVERIFY(!notes::clips(*w.m_project.find(first),24).isEmpty());
+        // Viewer Delete continues to delete annotations, leaving timeline media alone.
+        w.m_view->setFocus(); w.m_view->setSelection({"delete-note"}); w.deleteContextual();
+        QCOMPARE(w.m_project.timeline.videoClipCount(),2);
+        w.m_dirty=false;
+    }
+
+    void annotationLaneMouseResizePersistsAndResets() {
+        QSettings settings; const QVariant before=settings.value("timeline/noteLaneHeights");
+        const auto restore=qScopeGuard([&] { if (before.isValid()) settings.setValue("timeline/noteLaneHeights",before); else settings.remove("timeline/noteLaneHeights"); });
+        settings.remove("timeline/noteLaneHeights");
+        TimelineEditor editor; editor.resize(1100,850);
+        TimelineDoc doc; doc.noteTracks << TrackState{};
+        editor.setModel(doc,{},"Annotation lane resize"); editor.show(); QVERIFY(QTest::qWaitForWindowExposed(&editor));
+        QWidget* canvas=editor.canvas();
+        auto boundary=[&](int lane) { const auto p=editor.trackPoint(2,lane,0); return QPointF(45,p.y()+editor.annotationLaneHeight(lane)/2.0); };
+        QCOMPARE(editor.annotationLaneHeight(0),40); QCOMPARE(editor.annotationLaneHeight(1),40);
+        const double videoBefore=editor.trackPoint(0,0,0).y();
+        QTest::mouseMove(canvas,boundary(1).toPoint()); QTRY_COMPARE(canvas->cursor().shape(),Qt::SizeVerCursor);
+        dragOn(canvas,boundary(1),boundary(1)+QPointF(0,60));
+        QCOMPARE(editor.annotationLaneHeight(1),100); QCOMPARE(editor.annotationLaneHeight(0),40);
+        QCOMPARE(editor.trackPoint(0,0,0).y(),videoBefore+60); QVERIFY(editor.doc().sameLayout(doc));
+        { TimelineEditor reopened; QCOMPARE(reopened.annotationLaneHeight(1),100); QCOMPARE(reopened.annotationLaneHeight(0),40); }
+        dragOn(canvas,boundary(0),boundary(0)-QPointF(0,200)); QCOMPARE(editor.annotationLaneHeight(0),24);
+        dragOn(canvas,boundary(0),boundary(0)+QPointF(0,500)); QCOMPARE(editor.annotationLaneHeight(0),240);
+        QTest::mouseDClick(canvas,Qt::LeftButton,{},boundary(0).toPoint()); QCOMPARE(editor.annotationLaneHeight(0),40);
+        { TimelineEditor reopened; QCOMPARE(reopened.annotationLaneHeight(0),40); QCOMPARE(reopened.annotationLaneHeight(1),100); }
+        editor.resize(1100,320); QTest::qWait(40);
+        dragOn(canvas,boundary(1),boundary(1)+QPointF(0,100));
+        QVERIFY(editor.m_vscroll->maximum()>0); // growing lanes updates the scrollable content
+        QVERIFY(editor.grab().save(QApplication::applicationDirPath()+"/qa-resizable-note-lanes.png"));
+    }
+
+    void timelineEditorMouseKeysAndUndo() {
+        MainWindow w; w.resize(1500,950); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        w.createCanvas("Shot A",{160,90},48,24); w.createCanvas("Shot B",{160,90},24,24); w.setSolo(QString());
+        showEditor(w);
+        w.m_editor->setSnap(false); w.m_editor->setRipple(false); w.m_editor->setTool(TimelineEditor::Tool::Select);
+        QWidget* c=w.m_editor->canvas(); QVERIFY(c);
+        const QString b=videoClipOrder(w)[1];
+        // drag B twelve frames later: a gap opens before it
+        const double fx=w.m_editor->trackPoint(0,0,60).x()-w.m_editor->trackPoint(0,0,48).x();
+        const QPointF grab=w.m_editor->clipPoint(b,0.5);
+        dragOn(c,grab,grab+QPointF(fx,0));
+        QCOMPARE(w.m_project.timeline.clip(b)->start,qint64(60)); QCOMPARE(w.m_seq.total,int64_t(84)); QVERIFY(w.m_seq.at(50)->isGap());
+        w.undo(); QCOMPARE(w.m_project.timeline.clip(b)->start,qint64(48));
+        // drag B up onto a new V2 (above the top video track)
+        const QPointF up=w.m_editor->clipPoint(b,0.5);
+        dragOn(c,up,QPointF(up.x(),w.m_editor->trackPoint(2,0,0).y()));
+        QCOMPARE(w.m_project.timeline.clip(b)->track,1); QCOMPARE(w.m_project.timeline.videoTracks.size(),2);
+        w.undo(); QCOMPARE(w.m_project.timeline.clip(b)->track,0);
+        // trim B's head by 4 frames (no ripple): its In moves, it stays put otherwise
+        const double fx4=w.m_editor->trackPoint(0,0,52).x()-w.m_editor->trackPoint(0,0,48).x();
+        const QPointF head=w.m_editor->clipPoint(b,0);
+        dragOn(c,head,head+QPointF(fx4,0));
+        QCOMPARE(w.m_project.timeline.clip(b)->in,4); QCOMPARE(w.m_project.timeline.clip(b)->start,qint64(52));
+        w.undo();
+        // blade: click A at frame 20
+        const QString a=videoClipOrder(w)[0];
+        w.m_editor->setTool(TimelineEditor::Tool::Blade);
+        const QPointF cut=w.m_editor->trackPoint(0,0,20)-QPointF((w.m_editor->trackPoint(0,0,21).x()-w.m_editor->trackPoint(0,0,20).x())/2,0);
+        press(c,cut); release(c,cut);
+        QCOMPARE(w.m_project.timeline.videoClipCount(),3); QCOMPARE(w.m_project.timeline.clip(a)->out,19);
+        w.m_editor->setTool(TimelineEditor::Tool::Select);
+        // Delete lifts (gap stays), Shift+Delete ripples
+        const QString tail=videoClipOrder(w)[1];
+        const QPointF t=w.m_editor->clipPoint(tail,0.5); press(c,t); release(c,t);
+        QCOMPARE(w.m_editor->selectedClips(),QStringList{tail});
+        key(c,Qt::Key_Delete);
+        QCOMPARE(w.m_project.timeline.videoClipCount(),2); QCOMPARE(w.m_project.timeline.clip(b)->start,qint64(48)); QVERIFY(w.m_seq.at(30)->isGap());
+        w.undo();
+        const QPointF t2=w.m_editor->clipPoint(tail,0.5); press(c,t2); release(c,t2);
+        key(c,Qt::Key_Delete,Qt::ShiftModifier);
+        QCOMPARE(w.m_project.timeline.clip(b)->start,qint64(20)); QCOMPARE(w.m_seq.total,int64_t(44));
+        w.undo(); QCOMPARE(w.m_project.timeline.clip(b)->start,qint64(48));
+        // keys while the timeline has focus
+        key(c,Qt::Key_S); QVERIFY(w.m_editor->snap()); key(c,Qt::Key_S); QVERIFY(!w.m_editor->snap());
+        key(c,Qt::Key_B); QCOMPARE(w.m_editor->tool(),TimelineEditor::Tool::Blade); key(c,Qt::Key_V); QCOMPARE(w.m_editor->tool(),TimelineEditor::Tool::Select);
+        // nudge with Alt+arrow, disable with D
+        const QPointF nb=w.m_editor->clipPoint(b,0.5); press(c,nb); release(c,nb);
+        key(c,Qt::Key_Right,Qt::AltModifier); QCOMPARE(w.m_project.timeline.clip(b)->start,qint64(49));
+        key(c,Qt::Key_D); QVERIFY(!w.m_project.timeline.clip(b)->enabled); QVERIFY(w.m_seq.at(55)->isGap());
+        w.undo(); w.undo(); QVERIFY(w.m_project.timeline.clip(b)->enabled); QCOMPARE(w.m_project.timeline.clip(b)->start,qint64(48));
+        // copy / paste at the playhead
+        press(c,w.m_editor->clipPoint(b,0.5)); release(c,w.m_editor->clipPoint(b,0.5)); w.m_editor->setCurrent(72);
+        key(c,Qt::Key_C,Qt::ControlModifier); key(c,Qt::Key_V,Qt::ControlModifier);
+        QCOMPARE(w.m_project.timeline.videoClipCount(),4); QCOMPARE(w.m_seq.total,int64_t(96));
+        // ripple mode: dragging a clip earlier reorders
+        w.undo(); w.m_editor->setRipple(true);
+        const QPointF rb=w.m_editor->clipPoint(b,0.5);
+        dragOn(c,rb,QPointF(w.m_editor->trackPoint(0,0,1).x(),rb.y()));
+        QCOMPARE(w.m_project.timeline.clip(b)->start,qint64(0)); QCOMPARE(w.m_seq.total,int64_t(72));
+        w.m_editor->setRipple(false);
+        QVERIFY(windowShot(w,QApplication::applicationDirPath()+"/qa-timeline-multitrack.png"));
+        w.m_dirty=false;
+    }
+
+    void annotationLanesInEditorAndViewer() {
+        MainWindow w; w.resize(1400,900); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        w.createCanvas("Notes",{320,180},40,24); w.setSolo(QString());
+        const QString id=w.m_project.sources[0].id;
+        w.goToFrame(0); w.onAnnotationCreated(rect("r1"));
+        w.m_continueDrawing=true; w.goToFrame(10); w.onAnnotationCreated(rect("r2")); w.m_continueDrawing=false;
+        QVector<NoteClip> cl=notes::clips(*w.m_project.find(id),40);
+        QCOMPARE(cl.size(),2);
+        const NoteClip first=cl[0].first==0 ? cl[0] : cl[1], second=cl[0].first==0 ? cl[1] : cl[0];
+        QCOMPARE(first.lane,0); QCOMPARE(second.lane,1); QCOMPARE(first.icon,QString("rect"));
+        QVERIFY(w.m_reviewKeys.contains(0) && w.m_reviewKeys.contains(10));                      // red markers on the scrub bar stay
+        showEditor(w); w.m_editor->setSnap(false);
+        const QPointF block=w.m_editor->notePoint(id,second.key,0.5); QVERIFY(!block.isNull());
+        // hide lane N2: r2 disappears from the viewer, r1 stays
+        w.goToFrame(15);
+        // drawn on the picture: the rectangle's left edge (x = 0.12) is red
+        w.m_view->setShowAnnotations(true); QTest::qWait(40);
+        const QColor edge=viewPixel(*w.m_view,{0.12*320,0.32*180});
+        QVERIFY2(edge.red()>150 && edge.green()<90,qPrintable(edge.name()));
+        auto ids=[&] { QStringList out; for (const auto& i : w.m_view->m_layers[0]) out<<i.annotation.id; return out; };
+        QCOMPARE(ids(),QStringList({"r1","r2"}));
+        w.setTrackState(2,1,TrackState{QString(),false}); QCOMPARE(ids(),QStringList({"r1"}));
+        w.setTrackState(2,1,TrackState{});
+        // drag the r2 block five frames later in the timeline
+        QWidget* c=w.m_editor->canvas();
+        const double fx=w.m_editor->trackPoint(0,0,15).x()-w.m_editor->trackPoint(0,0,10).x();
+        dragOn(c,block,block+QPointF(fx,0));
+        QVERIFY(w.m_project.find(id)->renderable(12).size()==1); QCOMPARE(w.m_project.find(id)->renderable(16).size(),2);
+        w.undo(); QCOMPARE(w.m_project.find(id)->renderable(12).size(),2);
+        // trim r1 with its tail handle to end at frame 5
+        cl=notes::clips(*w.m_project.find(id),40);
+        const NoteClip r1=*std::find_if(cl.begin(),cl.end(),[](const NoteClip& n) { return n.first==0; });
+        const QPointF tailPt=w.m_editor->notePoint(id,r1.key,1);
+        const QPointF to(w.m_editor->trackPoint(0,0,6).x()-(w.m_editor->trackPoint(0,0,6).x()-w.m_editor->trackPoint(0,0,5).x())/2,tailPt.y());
+        dragOn(c,tailPt,to);
+        QVERIFY(w.m_project.find(id)->renderable(8).size()<=1); QCOMPARE(w.m_project.find(id)->renderable(3).size(),1);
+        // clicking a block selects its objects in the viewer
+        w.undo();
+        const QPointF sel=w.m_editor->notePoint(id,r1.key,0.2); press(c,sel); release(c,sel);
+        QCOMPARE(w.m_view->selectedIds(),QStringList({"r1"}));
+        QVERIFY(windowShot(w,QApplication::applicationDirPath()+"/qa-annotation-lanes.png"));
+        w.m_dirty=false;
+    }
+
+    void editPointsShuttleMarkAndGapPlayback() {
+        MainWindow w; w.createCanvas("A",{64,48},48,24); w.createCanvas("B",{64,48},24,24); w.setSolo(QString());
+        w.goToFrame(0); w.jumpEditPoint(1); QCOMPARE(w.m_current,int64_t(48)); w.jumpEditPoint(-1); QCOMPARE(w.m_current,int64_t(0));
+        w.goToFrame(50); w.markClip(); QCOMPARE(w.m_project.timeline.loopIn,48); QCOMPARE(w.m_project.timeline.loopOut,71); QVERIFY(w.m_project.timeline.loopEnabled);
+        w.clearLoop();
+        w.goToFrame(60); w.shuttle(-1); QTRY_VERIFY_WITH_TIMEOUT(w.m_current<56,3000); w.shuttle(0); QVERIFY(!w.m_shuttleTimer.isActive());
+        w.shuttle(-1); w.shuttle(-1); QCOMPARE(w.m_shuttle,-2); w.togglePlay(); QCOMPARE(w.m_shuttle,0);
+        // playback runs through an empty stretch
+        const QString a=videoClipOrder(w)[0];
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { return tl::remove(d,{a},false,w.lengthFn()); }));
+        w.goToFrame(0); w.togglePlay(); QVERIFY(w.m_playing);
+        QTRY_VERIFY_WITH_TIMEOUT(w.m_current>48,5000);
+        w.stopPlayback();
+        w.m_dirty=false;
+    }
+
+    void mcpTimelineAnnotationClipsAndFilterTools() {
+        MainWindow w; w.createCanvas("AI",{320,180},30,24); w.createCanvas("AI2",{320,180},20,24); w.setSolo(QString());
+        QString error;
+        QJsonObject list=w.runTool("timeline",{{"action","list"}},&error).toObject(); QVERIFY(error.isEmpty());
+        QCOMPARE(list["clips"].toArray().size(),2); QCOMPARE(list["video_tracks"].toArray().size(),1);
+        const QString second=list["clips"].toArray()[1].toObject()["clip_uid"].toString();
+        list=w.runTool("timeline",{{"action","place"},{"clip_uid",second},{"frame",40},{"track",1}},&error).toObject(); QVERIFY2(error.isEmpty(),qPrintable(error));
+        QCOMPARE(w.m_project.timeline.clip(second)->start,qint64(40)); QCOMPARE(w.m_project.timeline.clip(second)->track,1);
+        w.runTool("timeline",{{"action","set"},{"clip_uid",second},{"opacity",0.5},{"blend","difference"}},&error); QVERIFY(error.isEmpty());
+        QCOMPARE(w.m_project.timeline.clip(second)->opacity,0.5); QCOMPARE(w.m_project.timeline.clip(second)->blend,BlendMode::Difference);
+        w.runTool("timeline",{{"action","place"},{"clip_uid",second},{"frame",40},{"track",0}},&error);
+        w.runTool("timeline",{{"action","close_gap"},{"frame",35},{"track",0}},&error); QVERIFY2(error.isEmpty(),qPrintable(error));
+        QCOMPARE(w.m_project.timeline.clip(second)->start,qint64(30));
+        w.undo(); QCOMPARE(w.m_project.timeline.clip(second)->start,qint64(40));                 // AI edits are undoable
+        w.goToFrame(2); w.onAnnotationCreated(rect("ai-note"));
+        const QJsonObject notesList=w.runTool("annotation_clips",{{"action","list"}},&error).toObject(); QVERIFY(error.isEmpty());
+        QCOMPARE(notesList["clips"].toArray().size(),1);
+        const QString key=notesList["clips"].toArray()[0].toObject()["key"].toString();
+        w.runTool("annotation_clips",{{"action","trim"},{"key",key},{"first",2},{"last",6}},&error); QVERIFY2(error.isEmpty(),qPrintable(error));
+        QVERIFY(w.m_project.sources[0].renderable(8).isEmpty()); QCOMPARE(w.m_project.sources[0].renderable(5).size(),1);
+        const QJsonObject filter=w.runTool("set_filter",{{"mode","silhouette"},{"threshold",0.4}},&error).toObject(); QVERIFY(error.isEmpty());
+        QCOMPARE(w.m_filter.mode,AnalysisFilter::Mode::Silhouette); QCOMPARE(filter["threshold"].toDouble(),0.4);
+        w.runTool("set_filter",{{"mode","none"}},&error); QVERIFY(!w.m_filter.enabled());
+        QVERIFY(w.runTool("timeline",{{"action","bogus"}},&error).isNull());
+        w.m_dirty=false;
+    }
+
+    void timelineExportComposesTracks() {
+        MainWindow w; w.resize(1000,700);
+        const QString dir=QApplication::applicationDirPath();
+        w.importPaths({dir+"/qa-silhouette.mp4"}); w.importPaths({dir+"/qa-blue-tone.mp4"});
+        const QString blue=w.m_project.sources[1].id; w.setSolo(QString());
+        const QString blueClip=videoClipOf(w,blue);
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { return tl::moveOverwrite(d,tl::withLinks(d,{blueClip}),-48,1,0,false,w.lengthFn()); }));
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { TimelineClip* c=d.clip(blueClip); c->scale=0.35; c->posX=0.3; c->posY=-0.3; return true; }));
+        ExportJob job; job.project=w.m_project; job.sequence=w.m_seq; job.first=5; job.last=6; job.fps=24;
+        job.format=ExportJob::Format::PngSequence; job.output=temp.filePath("layers/frame");
+        job.timeline=true; job.canvas=w.canvasSize(); job.timelineFps=24;
+        for (int64_t g=job.first; g<=job.last; ++g) {
+            std::vector<ExportJob::Layer> frame;
+            for (const auto& p : w.visibleLayers(g)) frame.push_back({p.clip->sourceId,p.local,p.rect,p.clip->opacity,p.clip->blend,p.clip->uid==w.m_seq.at(g)->clipId});
+            job.layers.push_back(frame);
+        }
+        std::atomic<int64_t> done{0}; std::atomic<bool> cancel{false}; QString error;
+        QVERIFY2(runExport(job,done,cancel,&error),qPrintable(error));
+        const QImage png(temp.filePath("layers/frame_0000.png")); QCOMPARE(png.size(),QSize(320,180));
+        QVERIFY(near(png.pixelColor(256,36),QColor(0x20,0x60,0xC0),30));                         // V2 inset on top
+        QVERIFY(near(png.pixelColor(40,160),QColor(0xD8,0xD0,0xC0),30));                          // V1 behind it
+        w.m_dirty=false;
+    }
+
+    void qaShowcaseTimeline() {
+        // A realistic edit for the QA sheet: picture + sound, an inset on V2 with its sound on A2,
+        // annotation clips of every kind on their lanes, a gap, and the silhouette filter.
+        MainWindow w; w.resize(1600,1000); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        w.setOnion(false);
+        const QString dir=QApplication::applicationDirPath();
+        w.importPaths({dir+"/qa-audio-loop.mp4"}); w.importPaths({dir+"/qa-silhouette.mp4"}); w.importPaths({dir+"/qa-blue-tone.mp4"});
+        const QString loop=w.m_project.sources[0].id, sil=w.m_project.sources[1].id, blue=w.m_project.sources[2].id;
+        w.setSolo(QString());
+        QTRY_VERIFY_WITH_TIMEOUT(w.m_audioClips.count(loop) && w.m_audioClips.count(blue),15000);
+        const QString blueClip=videoClipOf(w,blue), silClip=videoClipOf(w,sil);
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { return tl::moveOverwrite(d,tl::withLinks(d,{blueClip}),30-96,1,1,false,w.lengthFn()); }));
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { TimelineClip* c=d.clip(blueClip); c->scale=0.35; c->posX=0.3; c->posY=-0.3; c->name="Ref inset"; return true; }));
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { return tl::moveOverwrite(d,{silClip},12,0,0,false,w.lengthFn()); }));  // a gap before it
+        QString blueSound; for (const TimelineClip& c : w.m_project.timeline.clips) if (c.isAudio() && c.sourceId==blue) blueSound=c.uid;
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { d.clip(blueSound)->gainDb=-6; d.clip(blueSound)->fadeIn=6; d.clip(blueSound)->fadeOut=6; return true; }));
+        // annotations on the first clip: a drawing, a text, then shapes drawn over them
+        Annotation stroke; stroke.id="qa-stroke"; stroke.type="stroke"; stroke.color=QColor(0xe5,0x48,0x3e); stroke.size=4;
+        for (int i=0;i<20;++i) stroke.points<<QPointF(.2+i*.02,.6-std::sin(i/19.0*3.14159)*.3);
+        w.goToFrame(4); w.onAnnotationCreated(stroke);
+        Annotation text; text.id="qa-text"; text.type="text"; text.text="Arc peak"; text.x=.55; text.y=.15; text.fontSize=22; text.color=Qt::white; text.useBg=true; text.bgColor="#000000";
+        w.goToFrame(14); w.onAnnotationCreated(text);
+        w.m_continueDrawing=true; w.goToFrame(20);
+        Annotation box=rect("qa-rect"); box.color=QColor(0x4a,0x86,0xe0); w.onAnnotationCreated(box);
+        w.m_continueDrawing=false;
+        showEditor(w);
+        w.resizeDocks({w.m_editorDock},{430},Qt::Vertical); QTest::qWait(60); w.m_editor->zoomToFit();
+        w.m_editor->setSelectedClips({blueClip});
+        w.goToFrame(36);
+        QTRY_VERIFY_WITH_TIMEOUT(w.m_view->m_a.frame && w.m_view->layerCount()==1 && w.m_view->m_above[0].tex.frame,10000);
+        QTest::qWait(150);
+        QVERIFY(windowShot(w,dir+"/qa-timeline-1.1.png"));
+        QVERIFY(!w.m_peaks.at(loop).isEmpty());
+        w.setFilterMode(AnalysisFilter::Mode::Silhouette); QTest::qWait(150);
+        QVERIFY(windowShot(w,dir+"/qa-silhouette-app.png"));
+        w.setFilterMode(AnalysisFilter::Mode::None);
+        w.m_dirty=false;
+    }
+    void perfTwoLayerPlayback() {
+        // UHD long-GOP on V1 with an HD B-frame inset on V2: both decode while the timeline plays.
+        const QString uhd="C:/dev/testmedia/uhd_h264_longgop.mp4", hd="C:/dev/testmedia/hd_h264_bframes.mp4";
+        if (!QFileInfo::exists(uhd) || !QFileInfo::exists(hd)) QSKIP("local test media not present");
+        MainWindow w; w.resize(1400,900); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        w.setOnion(false);
+        w.importPaths({uhd}); w.importPaths({hd});
+        const QString inset=videoClipOf(w,w.m_project.sources[1].id);
+        w.setSolo(QString());
+        QVERIFY(w.editTimeline([&](TimelineDoc& d) { TimelineClip* c=d.clip(inset); c->track=1; c->start=0; c->scale=0.35; c->posX=0.3; c->posY=-0.3; return true; }));
+        w.m_realtime=false;
+        w.goToFrame(0); QTRY_VERIFY_WITH_TIMEOUT(w.layersReady(0),15000);
+        w.togglePlay();
+        QTest::qWait(1500);                                 // warm-up: decoders reach the playhead
+        const int64_t f0=w.m_current; QElapsedTimer t; t.start();
+        QTest::qWait(4000);
+        const double fps=(w.m_current-f0)*1000.0/t.elapsed();
+        w.stopPlayback();
+        qInfo().noquote()<<QString("Two-layer playback (UHD V1 + HD V2 inset): %1 fps of %2").arg(fps,0,'f',1).arg(w.viewFps());
+        QVERIFY2(fps>w.viewFps()*0.8,qPrintable(QString::number(fps)));
+        w.m_dirty=false;
+    }
+    void realProjectsFromEarlierVersionsOpen() {
+        // Projects saved by earlier builds on this machine (read only; re-saved into the temp folder).
+        const QFileInfoList files=QDir("C:/dev/testmedia").entryInfoList({"*.frvm"},QDir::Files);
+        if (files.isEmpty()) QSKIP("no earlier projects on this machine");
+        for (const QFileInfo& fi : files) {
+            Project p; QString error; QVERIFY2(p.load(fi.absoluteFilePath(),&error),qPrintable(fi.fileName()+": "+error));
+            int keys=0; for (const Source& s : p.sources) keys+=int(s.annotations.size());
+            const QString copy=temp.filePath("again-"+fi.fileName()); QVERIFY(p.save(copy,&error));
+            Project q; QVERIFY(q.load(copy,&error));
+            int keys2=0; for (const Source& s : q.sources) keys2+=int(s.annotations.size());
+            QCOMPARE(keys2,keys); QCOMPARE(q.timeline.videoClipCount(),p.timeline.videoClipCount());
+            bool allMedia=true; for (const Source& s : p.sources) allMedia=allMedia && s.media.exists();
+            if (!allMedia) continue;
+            MainWindow w; QVERIFY(w.loadProject(fi.absoluteFilePath()));
+            QVERIFY(w.m_seq.total>0);
+            int open=0; for (const Source& s : w.m_project.sources) open+=int(s.annotations.size());
+            QCOMPARE(open,keys);
+            qInfo().noquote()<<QString("%1: %2 sources, %3 clips, %4 annotation keys, %5 frames").arg(fi.fileName()).arg(p.sources.size())
+                                .arg(w.m_project.timeline.clips.size()).arg(keys).arg(w.m_seq.total);
+            w.m_dirty=false;
+        }
     }
     void cleanupTestCase() { window->m_dirty=false; window.reset(); }
 };

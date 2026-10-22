@@ -31,6 +31,12 @@
 #include <QTabletEvent>
 #include <QTextDocument>
 #include <QWheelEvent>
+#include <QDebug>
+#include <QMatrix4x4>
+#include <QOpenGLContext>
+#include <QOpenGLFramebufferObject>
+#include <QVector3D>
+#include <QVector4D>
 #include <QtMath>
 
 #include <algorithm>
@@ -102,17 +108,124 @@ void main() {
 }
 )";
 
+// Video arrives as three 8-bit planes (Y', Cb, Cr) and is converted here with the frame's own
+// matrix and range, so the cache holds 1.5 bytes per pixel for 4:2:0 instead of 4.
+// uTint colours onion-skin frames (rgb = colour, a = strength) the way 2D animation tools do.
+// 1.1: the analysis filters (same maths as analysis::apply) run per picture, with a reference
+// picture (background plate / previous frame) on units 3-5, and the blend modes of timeline
+// layers; Difference reads what is already drawn (uDst) from the off-screen stack.
 const char* kFragmentShader = R"(
-uniform sampler2D uTex;
+uniform sampler2D uTex0;
+uniform sampler2D uTex1;
+uniform sampler2D uTex2;
+uniform int uLayout;
+uniform int uPairRG;
+uniform mat4 uYuv;
 uniform float uOpacity;
 uniform int uChannel;
+uniform vec4 uTint;
+uniform int uFilter;
+uniform float uThreshold;
+uniform float uSoft;
+uniform int uInvert;
+uniform int uLevels;
+uniform float uShowOriginal;
+uniform vec3 uInk;
+uniform vec3 uPaper;
+uniform vec3 uAccent;
+uniform vec2 uTexel;
+uniform sampler2D uRef0;
+uniform sampler2D uRef1;
+uniform sampler2D uRef2;
+uniform int uRefLayout;
+uniform mat4 uRefYuv;
+uniform sampler2D uDst;
+uniform int uBlend;
+uniform vec2 uViewport;
 varying vec2 vUv;
+
+vec3 fetchMain(vec2 uv) {
+    if (uLayout == 1) {
+        vec4 yuv = vec4(texture2D(uTex0, uv).r, texture2D(uTex1, uv).r, texture2D(uTex2, uv).r, 1.0);
+        return clamp((uYuv * yuv).rgb, 0.0, 1.0);
+    } else if (uLayout == 2) {
+        vec4 pair = texture2D(uTex1, uv);  // NV12: Cb/Cr side by side in one texel
+        vec4 yuv = vec4(texture2D(uTex0, uv).r, pair.r, uPairRG == 1 ? pair.g : pair.a, 1.0);
+        return clamp((uYuv * yuv).rgb, 0.0, 1.0);
+    }
+    return texture2D(uTex0, uv).rgb;
+}
+vec3 fetchRef(vec2 uv) {
+    if (uRefLayout == 1) {
+        vec4 yuv = vec4(texture2D(uRef0, uv).r, texture2D(uRef1, uv).r, texture2D(uRef2, uv).r, 1.0);
+        return clamp((uRefYuv * yuv).rgb, 0.0, 1.0);
+    } else if (uRefLayout == 2) {
+        vec4 pair = texture2D(uRef1, uv);
+        vec4 yuv = vec4(texture2D(uRef0, uv).r, pair.r, uPairRG == 1 ? pair.g : pair.a, 1.0);
+        return clamp((uRefYuv * yuv).rgb, 0.0, 1.0);
+    }
+    return texture2D(uRef0, uv).rgb;
+}
+float lumaOf(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+float diffAt(vec2 uv) {
+    vec3 d = abs(fetchMain(uv) - fetchRef(uv));
+    return max(d.r, max(d.g, d.b));
+}
+float areaDiff() {
+    return (diffAt(vUv) + diffAt(vUv + vec2(uTexel.x, 0.0)) + diffAt(vUv - vec2(uTexel.x, 0.0)) +
+            diffAt(vUv + vec2(0.0, uTexel.y)) + diffAt(vUv - vec2(0.0, uTexel.y))) / 5.0;
+}
+float lumaAt(vec2 d) { return lumaOf(fetchMain(vUv + d * uTexel)); }
 void main() {
-    vec4 c = texture2D(uTex, vUv);
-    if (uChannel == 1) c.rgb = vec3(c.r, 0.0, 0.0);
-    else if (uChannel == 2) c.rgb = vec3(0.0, c.g, 0.0);
-    else if (uChannel == 3) c.rgb = vec3(0.0, 0.0, c.b);
-    gl_FragColor = vec4(c.rgb, uOpacity);
+    vec3 c = fetchMain(vUv);
+    if (uFilter != 0) {
+        float Y = lumaOf(c);
+        vec3 back = mix(uPaper, c, uShowOriginal);
+        float soft = max(uSoft, 0.002);
+        float lo = uThreshold - soft;
+        float hi = uThreshold + soft;
+        if (uFilter == 1) {
+            float s = smoothstep(lo, hi, Y);
+            c = mix(back, uInk, uInvert == 1 ? s : 1.0 - s);
+        } else if (uFilter == 2) {
+            float m = uRefLayout >= 0 ? smoothstep(lo, hi, areaDiff()) : 0.0;
+            c = mix(back, uInk, m);
+        } else if (uFilter == 3) {
+            float a = lumaAt(vec2(-1.0, -1.0)), b = lumaAt(vec2(0.0, -1.0)), e = lumaAt(vec2(1.0, -1.0));
+            float l = lumaAt(vec2(-1.0, 0.0)), r = lumaAt(vec2(1.0, 0.0));
+            float f = lumaAt(vec2(-1.0, 1.0)), g = lumaAt(vec2(0.0, 1.0)), h = lumaAt(vec2(1.0, 1.0));
+            float gx = (e + 2.0 * r + h) - (a + 2.0 * l + f);
+            float gy = (f + 2.0 * g + h) - (a + 2.0 * b + e);
+            c = mix(back, uInk, smoothstep(lo, hi, sqrt(gx * gx + gy * gy) * 0.25));
+        } else if (uFilter == 4) {
+            c = vec3(Y);
+        } else if (uFilter == 5) {
+            vec3 dark = uInvert == 1 ? uPaper : uInk;
+            vec3 light = uInvert == 1 ? uInk : uPaper;
+            if (uLevels >= 3) c = Y < uThreshold - 0.15 ? dark : (Y < uThreshold + 0.15 ? mix(dark, light, 0.5) : light);
+            else c = Y < uThreshold ? dark : light;
+        } else if (uFilter == 6) {
+            float m = uRefLayout >= 0 ? smoothstep(lo, hi, areaDiff()) : 0.0;
+            c = mix(vec3(Y * 0.55), uAccent, m);
+        }
+    }
+    if (uChannel == 1) c = vec3(c.r, 0.0, 0.0);
+    else if (uChannel == 2) c = vec3(0.0, c.g, 0.0);
+    else if (uChannel == 3) c = vec3(0.0, 0.0, c.b);
+    if (uTint.a > 0.0) {
+        float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        c = mix(c, uTint.rgb * (0.35 + 0.65 * luma), uTint.a);
+    }
+    if (uBlend == 4) {  // difference with what is under it
+        vec3 d = texture2D(uDst, gl_FragCoord.xy / uViewport).rgb;
+        gl_FragColor = vec4(mix(d, abs(c - d), uOpacity), 1.0);
+    } else if (uBlend == 3) {  // multiply: GL_DST_COLOR, GL_ZERO
+        gl_FragColor = vec4(mix(vec3(1.0), c, uOpacity), 1.0);
+    } else if (uBlend == 2) {  // screen: GL_ONE_MINUS_DST_COLOR, GL_ONE
+        gl_FragColor = vec4(c * uOpacity, 1.0);
+    } else {
+        gl_FragColor = vec4(c, uOpacity);  // normal / add (alpha weights)
+    }
 }
 )";
 
@@ -142,11 +255,20 @@ Viewport::Viewport(QWidget* parent)
 
 Viewport::~Viewport()
 {
+    if (!m_glReady) return;  // never shown: no context, nothing to free
     makeCurrent();
-    for (Tex* t : { &m_a, &m_b })
-        if (t->id) glDeleteTextures(1, &t->id);
-    for (Tex& t : m_ghostTex)
-        if (t.id) glDeleteTextures(1, &t.id);
+    release(m_a);
+    release(m_b);
+    release(m_aRef);
+    release(m_bRef);
+    for (Tex& t : m_ghostTex) release(t);
+    for (QVector<LayerTex>* list : { &m_below, &m_above })
+        for (LayerTex& l : *list) {
+            release(l.tex);
+            release(l.ref);
+        }
+    if (m_dstTex) glDeleteTextures(1, &m_dstTex);
+    delete m_stackFbo;
     m_vbo.destroy();
     doneCurrent();
 }
@@ -169,12 +291,101 @@ void Viewport::setFrame(FrameCache::Ptr image)
     update();
 }
 
+void Viewport::setPrimaryPlacement(QSize size, QRectF rect, float opacity, BlendMode blend)
+{
+    if (!size.isValid() || rect.isEmpty()) {
+        size = QSize();
+        rect = QRectF();
+    }
+    if (size == m_aSize && rect == m_aRect && opacity == m_aOpacity && blend == m_aBlend) return;
+    m_aSize = size;
+    m_aRect = rect;
+    m_aOpacity = opacity;
+    m_aBlend = blend;
+    positionTextEditor();
+    update();
+}
+
+QRectF Viewport::primaryRect() const { return m_aRect.isEmpty() ? QRectF(QPointF(0, 0), QSizeF(m_media)) : m_aRect; }
+
+QTransform Viewport::primaryToCanvas() const
+{
+    if (m_aRect.isEmpty() || !m_aSize.isValid()) return {};
+    QTransform t;
+    t.translate(m_aRect.x(), m_aRect.y());
+    t.scale(m_aRect.width() / m_aSize.width(), m_aRect.height() / m_aSize.height());
+    return t;
+}
+
+void Viewport::setTexFrame(Tex& t, FrameCache::Ptr frame)
+{
+    if (frame == t.frame) return;
+    t.frame = std::move(frame);
+    t.dirty = bool(t.frame);
+}
+
+void Viewport::setLayers(QVector<Layer> below, QVector<Layer> above)
+{
+    auto assign = [this](QVector<LayerTex>& texs, const QVector<Layer>& layers) {
+        if (texs.size() > layers.size()) {
+            if (m_glReady) {
+                makeCurrent();
+                for (qsizetype i = layers.size(); i < texs.size(); ++i) {
+                    release(texs[i].tex);
+                    release(texs[i].ref);
+                }
+                doneCurrent();
+            }
+            texs.resize(layers.size());
+        }
+        if (texs.size() < layers.size()) texs.resize(layers.size());
+        for (qsizetype i = 0; i < layers.size(); ++i) {
+            setTexFrame(texs[i].tex, layers[i].frame);
+            setTexFrame(texs[i].ref, layers[i].reference);
+            texs[i].rect = layers[i].rect;
+            texs[i].opacity = layers[i].opacity;
+            texs[i].blend = layers[i].blend;
+        }
+    };
+    assign(m_below, below);
+    assign(m_above, above);
+    update();
+}
+
+void Viewport::setFilter(const AnalysisFilter& filter, double threshold)
+{
+    m_filter = filter;
+    m_filterThreshold = threshold;
+    update();
+}
+
+void Viewport::setFilterReference(FrameCache::Ptr a, FrameCache::Ptr b)
+{
+    setTexFrame(m_aRef, std::move(a));
+    setTexFrame(m_bRef, std::move(b));
+    update();
+}
+
 void Viewport::clearFrame()
 {
     m_a.frame.reset();
     m_a.dirty = false;
     m_b.frame.reset();
-    for (Tex& t : m_ghostTex) t.frame.reset();
+    m_b.dirty = false;
+    m_aRef.frame.reset();
+    m_bRef.frame.reset();
+    for (QVector<LayerTex>* list : { &m_below, &m_above })
+        for (LayerTex& l : *list) {
+            l.tex.frame.reset();
+            l.ref.frame.reset();
+        }
+    m_below.clear();
+    m_above.clear();
+    for (Tex& t : m_ghostTex) {
+        t.frame.reset();
+        t.dirty = false;
+    }
+    m_ghostInfo.clear();
     update();
 }
 
@@ -235,17 +446,38 @@ void Viewport::setOnion(QVector<Ghost> notes, QVector<FrameGhost> frames)
 {
     m_ghosts = std::move(notes);
     if (m_ghostTex.size() < frames.size()) m_ghostTex.resize(frames.size());
-    m_ghostSide.clear();
-    for (const FrameGhost& g : frames) m_ghostSide << g.side;
-    m_ghostOpacity.resize(frames.size());
+    m_ghostInfo.clear();
+    m_ghostInfo.reserve(frames.size());
+    for (const FrameGhost& g : frames) m_ghostInfo.append({ g.opacity, g.side, g.tint, g.tintStrength });
     for (qsizetype i = 0; i < m_ghostTex.size(); ++i) {
         FrameCache::Ptr f = i < frames.size() ? frames[i].frame : nullptr;
+        // Re-uploading costs a texture transfer per ghost, so only when the picture changed.
         if (f != m_ghostTex[i].frame) {
             m_ghostTex[i].frame = f;
             m_ghostTex[i].dirty = bool(f);
         }
-        if (i < frames.size()) m_ghostOpacity[i] = frames[i].opacity;
     }
+    update();
+}
+
+void Viewport::setFlipHorizontal(bool on)
+{
+    if (on == m_flipH) return;
+    m_flipH = on;
+    positionTextEditor();
+    update();
+}
+
+void Viewport::setHud(const QString& text)
+{
+    if (text == m_hud) return;
+    m_hud = text;
+    if (m_showHud) update();
+}
+
+void Viewport::setShowHud(bool on)
+{
+    m_showHud = on;
     update();
 }
 
@@ -372,6 +604,12 @@ QTransform Viewport::mediaToWidget() const
     t.translate(width() / 2.0 + m_pan.x(), height() / 2.0 + m_pan.y());
     t.scale(s, s);
     t.translate(-v.width() / 2.0, -v.height() / 2.0);
+    if (m_flipH) {
+        // Mirror the whole layout (image, notes, tracks) around the centre; pointer mapping
+        // uses the inverse, so drawing on a mirrored view lands where it is seen.
+        t.translate(v.width(), 0);
+        t.scale(-1, 1);
+    }
     return t;
 }
 
@@ -383,11 +621,15 @@ QPointF Viewport::toNormalized(const QPointF& m) const
     return QPointF(m.x() / am.width(), m.y() / am.height());
 }
 
-QSize Viewport::layerMedia(int side) const { return side == 1 && m_bSize.isValid() ? m_bSize : m_media; }
+QSize Viewport::layerMedia(int side) const
+{
+    if (side == 1) return m_bSize.isValid() ? m_bSize : m_media;
+    return m_aSize.isValid() && !m_aRect.isEmpty() ? m_aSize : m_media;
+}
 
 QTransform Viewport::annoToWidget(int side) const
 {
-    if (side == 0) return mediaToWidget();
+    if (side == 0) return primaryToCanvas() * mediaToWidget();
     // B is drawn fitted into its half: B pixels -> that rect -> widget
     const QRectF r = compareRect();
     const QSizeF m(layerMedia(1));
@@ -404,7 +646,7 @@ bool Viewport::sideEditable(int side) const
 
 QRectF Viewport::layerClip(int side) const
 {
-    QRectF r = side == 1 ? compareRect() : QRectF(QPointF(0, 0), QSizeF(m_media));
+    QRectF r = side == 1 ? compareRect() : primaryRect();
     if (m_compare == CompareMode::Wipe) {
         // A on the left of the wipe line, B on the right
         const double x = m_media.width() * m_wipe;
@@ -470,8 +712,16 @@ void Viewport::initializeGL()
     m_program.addShaderFromSourceCode(QOpenGLShader::Fragment, kFragmentShader);
     m_program.bindAttributeLocation("aPos", 0);
     m_program.bindAttributeLocation("aUv", 1);
-    m_program.link();
+    if (!m_program.link()) qWarning().noquote() << "Viewer shader:" << m_program.log();
     m_vbo.create();
+    // Single-channel planes: GL_LUMINANCE works on every compatibility / ES context we can get;
+    // a core profile only has GL_RED.
+    const QSurfaceFormat fmt = context()->format();
+    const bool core = !context()->isOpenGLES() && fmt.profile() == QSurfaceFormat::CoreProfile;
+    m_planeFormat = core ? GL_RED : GL_LUMINANCE;
+    m_pairFormat = core ? GL_RG : GL_LUMINANCE_ALPHA;
+    m_glReady = true;
+    qInfo().noquote() << QStringLiteral("Viewer: OpenGL %1.%2, GPU Y'CbCr -> RGB").arg(fmt.majorVersion()).arg(fmt.minorVersion());
 }
 
 void Viewport::resizeGL(int, int)
@@ -482,35 +732,80 @@ void Viewport::resizeGL(int, int)
 
 void Viewport::upload(Tex& t)
 {
-    if (!t.frame || t.frame->isNull()) return;
-    const QImage& img = *t.frame;
-    if (!t.id) glGenTextures(1, &t.id);
-    glBindTexture(GL_TEXTURE_2D, t.id);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    if (t.size != img.size()) {
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.width(), img.height(), 0, GL_RGBA, GL_UNSIGNED_BYTE, img.constBits());
-        t.size = img.size();
-    } else {
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, img.width(), img.height(), GL_RGBA, GL_UNSIGNED_BYTE, img.constBits());
-    }
     t.dirty = false;
+    if (!t.frame || t.frame->isNull()) return;
+    const VideoFrame& f = *t.frame;
+    const bool rgba = f.format() == VideoFrame::Format::RGBA;
+    const bool nv12 = f.format() == VideoFrame::Format::NV12;
+    // A texture's storage is reallocated only when its size or pixel layout changes.
+    const int layout = rgba ? 0 : nv12 ? 2 : 1;
+    for (int i = 0; i < f.planeCount(); ++i) {
+        const GLenum fmt = rgba ? GL_RGBA : (nv12 && i == 1) ? m_pairFormat : m_planeFormat;
+        const QSize size(f.planeWidth(i), f.planeHeight(i));
+        const uint8_t* data = f.planeData(i);
+        if (!data || size.isEmpty()) continue;
+        if (!t.id[i]) glGenTextures(1, &t.id[i]);
+        glBindTexture(GL_TEXTURE_2D, t.id[i]);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, rgba ? 4 : 1);
+        if (t.size[i] != size || t.layout != layout) {
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GLint(fmt), size.width(), size.height(), 0, fmt, GL_UNSIGNED_BYTE, data);
+            t.size[i] = size;
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, size.width(), size.height(), fmt, GL_UNSIGNED_BYTE, data);
+        }
+    }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    t.layout = layout;
 }
 
-void Viewport::drawTexture(Tex& t, const QRectF& mediaRect, float opacity, const QRectF* clip)
+void Viewport::release(Tex& t)
 {
-    if (!t.frame) return;
+    for (GLuint& id : t.id)
+        if (id) glDeleteTextures(1, &id), id = 0;
+    t.size[0] = t.size[1] = t.size[2] = QSize();
+    t.layout = -1;
+    t.dirty = bool(t.frame);
+}
+
+void Viewport::drawTexture(Tex& t, const QRectF& mediaRect, float opacity, const QRectF* clip, const QColor& tint, float tintStrength,
+                           Tex* ref, BlendMode blend, bool filtered)
+{
+    if (!t.frame || t.frame->isNull()) return;
     if (t.dirty) upload(t);
+    if (!t.id[0]) return;
+    if (ref && ref->frame && !ref->frame->isNull() && ref->dirty) upload(*ref);
+    const bool useRef = ref && ref->frame && !ref->frame->isNull() && ref->id[0];
+    const qreal dprNow = devicePixelRatioF();
+    if (blend == BlendMode::Difference) {
+        // What is already drawn here becomes uDst (the stack is single-sampled off screen).
+        const QSize dev(int(width() * dprNow), int(height() * dprNow));
+        if (!m_dstTex) glGenTextures(1, &m_dstTex);
+        glActiveTexture(GL_TEXTURE6);
+        glBindTexture(GL_TEXTURE_2D, m_dstTex);
+        if (m_dstSize != dev) {
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, dev.width(), dev.height(), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            m_dstSize = dev;
+        }
+        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, dev.width(), dev.height());
+        glActiveTexture(GL_TEXTURE0);
+    }
     const QTransform xf = mediaToWidget();
     const QRectF r = xf.mapRect(mediaRect);
     const float W = float(width()), H = float(height());
     auto nx = [&](qreal x) { return float(2.0 * x / W - 1.0); };
     auto ny = [&](qreal y) { return float(1.0 - 2.0 * y / H); };
     const float l = nx(r.left()), rt = nx(r.right()), tp = ny(r.top()), b = ny(r.bottom());
+    // Mirrored view: the quad stays put, the texture runs the other way.
+    const float u0 = m_flipH ? 1.f : 0.f, u1 = m_flipH ? 0.f : 1.f;
     const float verts[] = {
-        l, tp, 0, 0,   l, b, 0, 1,   rt, b, 1, 1,
-        l, tp, 0, 0,   rt, b, 1, 1,  rt, tp, 1, 0,
+        l, tp, u0, 0,   l, b, u0, 1,   rt, b, u1, 1,
+        l, tp, u0, 0,   rt, b, u1, 1,  rt, tp, u1, 0,
     };
 
     const qreal dpr = devicePixelRatioF();
@@ -528,17 +823,73 @@ void Viewport::drawTexture(Tex& t, const QRectF& mediaRect, float opacity, const
     m_program.enableAttributeArray(1);
     m_program.setAttributeBuffer(0, GL_FLOAT, 0, 2, 4 * sizeof(float));
     m_program.setAttributeBuffer(1, GL_FLOAT, 2 * sizeof(float), 2, 4 * sizeof(float));
-    m_program.setUniformValue("uTex", 0);
+    m_program.setUniformValue("uTex0", 0);
+    m_program.setUniformValue("uTex1", 1);
+    m_program.setUniformValue("uTex2", 2);
+    m_program.setUniformValue("uLayout", t.layout);
+    m_program.setUniformValue("uPairRG", m_pairFormat == GL_RG ? 1 : 0);
+    if (t.layout != 0) {
+        float m[16];
+        t.frame->yuvToRgbMatrix(m);
+        m_program.setUniformValue("uYuv", QMatrix4x4(m));
+    }
     m_program.setUniformValue("uOpacity", opacity);
     m_program.setUniformValue("uChannel", int(m_colorChannel));
+    m_program.setUniformValue("uTint", QVector4D(float(tint.redF()), float(tint.greenF()), float(tint.blueF()),
+                                                 std::clamp(tintStrength, 0.f, 1.f)));
+    // Analysis filter
+    const bool filter = filtered && m_filter.enabled();
+    m_program.setUniformValue("uFilter", filter ? int(m_filter.mode) : 0);
+    m_program.setUniformValue("uThreshold", float(m_filterThreshold));
+    m_program.setUniformValue("uSoft", float(m_filter.softness));
+    m_program.setUniformValue("uInvert", m_filter.invert ? 1 : 0);
+    m_program.setUniformValue("uLevels", m_filter.levels);
+    m_program.setUniformValue("uShowOriginal", float(m_filter.showOriginal));
+    auto vec = [](const QColor& c) { return QVector3D(float(c.redF()), float(c.greenF()), float(c.blueF())); };
+    m_program.setUniformValue("uInk", vec(m_filter.ink));
+    m_program.setUniformValue("uPaper", vec(m_filter.paper));
+    m_program.setUniformValue("uAccent", vec(m_filter.accent));
+    m_program.setUniformValue("uTexel", QVector2D(1.f / float(std::max(1, t.frame->width())), 1.f / float(std::max(1, t.frame->height()))));
+    m_program.setUniformValue("uRef0", 3);
+    m_program.setUniformValue("uRef1", 4);
+    m_program.setUniformValue("uRef2", 5);
+    m_program.setUniformValue("uDst", 6);
+    m_program.setUniformValue("uRefLayout", filter && useRef ? ref->layout : -1);
+    if (filter && useRef && ref->layout != 0) {
+        float m[16];
+        ref->frame->yuvToRgbMatrix(m);
+        m_program.setUniformValue("uRefYuv", QMatrix4x4(m));
+    }
+    m_program.setUniformValue("uBlend", int(blend));
+    m_program.setUniformValue("uViewport", QVector2D(float(width() * dprNow), float(height() * dprNow)));
 
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, t.id);
-    const bool pixelPeep = (r.width() / std::max(1, t.size.width())) * dpr > 1.5;
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, pixelPeep ? GL_NEAREST : GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // Nearest filtering once a media pixel covers more than ~1.5 screen pixels (pixel peeping).
+    const bool pixelPeep = (r.width() / std::max(1, t.frame->width())) * dpr > 1.5;
+    const int planes = t.layout == 1 ? 3 : t.layout == 2 ? 2 : 1;
+    const int refPlanes = filter && useRef ? (ref->layout == 1 ? 3 : ref->layout == 2 ? 2 : 1) : 0;
+    for (int i = 0; i < refPlanes; ++i) {
+        glActiveTexture(GL_TEXTURE3 + i);
+        glBindTexture(GL_TEXTURE_2D, ref->id[i]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    }
+    if (blend == BlendMode::Difference) {
+        glActiveTexture(GL_TEXTURE6);
+        glBindTexture(GL_TEXTURE_2D, m_dstTex);
+    }
+    for (int i = planes - 1; i >= 0; --i) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, t.id[i]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, pixelPeep ? GL_NEAREST : GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    }
+    switch (blend) {
+    case BlendMode::Difference: glDisable(GL_BLEND); break;
+    case BlendMode::Add: glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE); break;
+    case BlendMode::Screen: glEnable(GL_BLEND); glBlendFunc(GL_ONE_MINUS_DST_COLOR, GL_ONE); break;
+    case BlendMode::Multiply: glEnable(GL_BLEND); glBlendFunc(GL_DST_COLOR, GL_ZERO); break;
+    default: glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); break;
+    }
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glDisable(GL_BLEND);
     if (clip) glDisable(GL_SCISSOR_TEST);
@@ -547,7 +898,93 @@ void Viewport::drawTexture(Tex& t, const QRectF& mediaRect, float opacity, const
     m_program.disableAttributeArray(1);
     m_vbo.release();
     m_program.release();
+    for (int i = 6; i >= 0; --i) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+}
+
+void Viewport::drawFramebuffer(GLuint texture)
+{
+    // The off-screen stack, 1:1 over the widget (its rows run bottom-up).
+    const float verts[] = {
+        -1, 1, 0, 1,   -1, -1, 0, 0,   1, -1, 1, 0,
+        -1, 1, 0, 1,   1, -1, 1, 0,    1, 1, 1, 1,
+    };
+    m_program.bind();
+    m_vbo.bind();
+    m_vbo.allocate(verts, sizeof verts);
+    m_program.enableAttributeArray(0);
+    m_program.enableAttributeArray(1);
+    m_program.setAttributeBuffer(0, GL_FLOAT, 0, 2, 4 * sizeof(float));
+    m_program.setAttributeBuffer(1, GL_FLOAT, 2 * sizeof(float), 2, 4 * sizeof(float));
+    m_program.setUniformValue("uTex0", 0);
+    m_program.setUniformValue("uLayout", 0);
+    m_program.setUniformValue("uOpacity", 1.f);
+    m_program.setUniformValue("uChannel", 0);
+    m_program.setUniformValue("uTint", QVector4D(0, 0, 0, 0));
+    m_program.setUniformValue("uFilter", 0);
+    m_program.setUniformValue("uRefLayout", -1);
+    m_program.setUniformValue("uBlend", 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glDisable(GL_BLEND);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindTexture(GL_TEXTURE_2D, 0);
+    m_program.disableAttributeArray(0);
+    m_program.disableAttributeArray(1);
+    m_vbo.release();
+    m_program.release();
+}
+
+void Viewport::drawGhosts(int side)
+{
+    // Onion-skin frames, clipped to their own side. Farther frames come first so the nearest
+    // neighbours end up on top, like a light table.
+    const bool comparing = m_compare != CompareMode::Off;
+    for (qsizetype i = m_ghostInfo.size() - 1; i >= 0; --i) {
+        if (i >= m_ghostTex.size()) continue;
+        const GhostInfo& g = m_ghostInfo[i];
+        if (g.side != side || !m_ghostTex[i].frame || !sideEditable(g.side)) continue;
+        const QRectF clip = layerClip(g.side);
+        // A ghost has its own previous frame, so motion highlight would compare the wrong pictures.
+        const bool plate = m_filter.mode == AnalysisFilter::Mode::MovingSilhouette;
+        drawTexture(m_ghostTex[i], g.side ? compareRect() : primaryRect(), float(g.opacity), comparing ? &clip : nullptr,
+                    g.tint, float(g.tintStrength), plate ? (g.side ? &m_bRef : &m_aRef) : nullptr, BlendMode::Normal,
+                    m_filter.mode != AnalysisFilter::Mode::MotionHighlight);
+    }
+}
+
+void Viewport::drawVideoStack()
+{
+    // Track order: lower tracks first, the edited picture (A) at its own track, higher ones over it.
+    bool difference = m_aBlend == BlendMode::Difference;
+    for (const QVector<LayerTex>* list : { &m_below, &m_above })
+        for (const LayerTex& l : *list) difference = difference || (l.blend == BlendMode::Difference && l.tex.frame);
+    const qreal dpr = devicePixelRatioF();
+    const QSize dev(int(width() * dpr), int(height() * dpr));
+    if (difference) {
+        if (!m_stackFbo || m_stackFbo->size() != dev) {
+            delete m_stackFbo;
+            m_stackFbo = new QOpenGLFramebufferObject(dev, QOpenGLFramebufferObject::NoAttachment, GL_TEXTURE_2D, GL_RGBA8);
+        }
+        m_stackFbo->bind();
+        glViewport(0, 0, dev.width(), dev.height());
+        glClearColor(Pal::viewer.redF(), Pal::viewer.greenF(), Pal::viewer.blueF(), 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+    const float base = float(m_videoOpacity);
+    for (LayerTex& l : m_below) drawTexture(l.tex, l.rect, l.opacity * base, nullptr, QColor(), 0.f, &l.ref, l.blend);
+    drawTexture(m_a, primaryRect(), m_aOpacity * base, nullptr, QColor(), 0.f, &m_aRef, m_aBlend);
+    drawGhosts(0);  // A's onion skin belongs to A's track: higher tracks still cover it
+    for (LayerTex& l : m_above) drawTexture(l.tex, l.rect, l.opacity * base, nullptr, QColor(), 0.f, &l.ref, l.blend);
+    if (difference) {
+        glBindFramebuffer(GL_FRAMEBUFFER, defaultFramebufferObject());
+        glViewport(0, 0, dev.width(), dev.height());
+        drawFramebuffer(m_stackFbo->texture());
+    }
 }
 
 // ================================================================== painting
@@ -567,24 +1004,17 @@ void Viewport::paintGL()
     glClearColor(Pal::viewer.redF(), Pal::viewer.greenF(), Pal::viewer.blueF(), 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    drawTexture(m_a, mediaRect, float(m_videoOpacity), nullptr);
+    drawVideoStack();
     if (comparing && m_b.frame) {
         const QRectF br = compareRect();
         if (m_compare == CompareMode::Wipe) {
             const QRectF clip(QPointF(msize.width() * m_wipe, 0), QPointF(msize.width(), msize.height()));
-            drawTexture(m_b, br, float(m_videoOpacity), &clip);
+            drawTexture(m_b, br, float(m_videoOpacity), &clip, QColor(), 0.f, &m_bRef);
         } else {
-            drawTexture(m_b, br, m_compare == CompareMode::Blend ? 0.5f : float(m_videoOpacity), nullptr);
+            drawTexture(m_b, br, m_compare == CompareMode::Blend ? 0.5f : float(m_videoOpacity), nullptr, QColor(), 0.f, &m_bRef);
         }
     }
-    // Ghosts must be composited after both base images, clipped to their own side.
-    for (qsizetype i = 0; i < m_ghostTex.size() && i < m_ghostOpacity.size(); ++i) {
-        const int side = i < m_ghostSide.size() ? m_ghostSide[i] : 0;
-        if (!m_ghostTex[i].frame || !sideEditable(side)) continue;
-        const QRectF clip = layerClip(side);
-        drawTexture(m_ghostTex[i], side ? compareRect() : mediaRect,
-                    float(m_ghostOpacity[i]), comparing ? &clip : nullptr);
-    }
+    drawGhosts(1);
     p.endNativePainting();
 
     p.setRenderHint(QPainter::Antialiasing, true);
@@ -753,6 +1183,39 @@ void Viewport::paintGL()
         p.setBrush(Qt::NoBrush);
         p.setPen(QPen(QColor(255, 255, 255, 170), 1));
         p.drawEllipse(m_hover, m_eraserSize / 2, m_eraserSize / 2);
+    }
+
+    // Frame counter overlay (Video > Frame HUD): frame, clip frame, time, rate.
+    if (m_showHud && !m_hud.isEmpty()) {
+        p.resetTransform();
+        QFont f(QStringLiteral("Cascadia Mono"));
+        f.setStyleHint(QFont::Monospace);
+        f.setPixelSize(13);
+        p.setFont(f);
+        const QFontMetrics fm(f);
+        const QStringList lines = m_hud.split('\n');
+        int w = 0;
+        for (const QString& line : lines) w = std::max(w, fm.horizontalAdvance(line));
+        const QRectF box(12, height() - 14 - lines.size() * fm.height() - 10, w + 20, lines.size() * fm.height() + 10);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(12, 12, 11, 190));
+        p.drawRoundedRect(box, 6, 6);
+        p.setPen(Pal::textStrong);
+        p.drawText(box.adjusted(10, 5, -10, -5), Qt::AlignLeft | Qt::AlignVCenter, m_hud);
+    }
+    if (m_flipH) {
+        p.resetTransform();
+        QFont f = font();
+        f.setPixelSize(11);
+        p.setFont(f);
+        const QString tag = L("MIRRORED", "좌우 반전");
+        const int tw = QFontMetrics(f).horizontalAdvance(tag) + 16;
+        const QRectF pill(width() - tw - 12, height() - 32, tw, 20);
+        p.setPen(QPen(Pal::accent, 1));
+        p.setBrush(QColor(20, 20, 19, 200));
+        p.drawRoundedRect(pill, 6, 6);
+        p.setPen(Pal::text);
+        p.drawText(pill, Qt::AlignCenter, tag);
     }
 }
 

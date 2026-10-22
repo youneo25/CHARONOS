@@ -37,7 +37,7 @@ FrameCache::Ptr FrameCache::get(int64_t index)
     auto it = m_map.find(index);
     if (it == m_map.end()) return {};
     m_lru.splice(m_lru.begin(), m_lru, it->second.pos);
-    return it->second.image;
+    return it->second.frame;
 }
 
 bool FrameCache::contains(int64_t index) const
@@ -46,19 +46,19 @@ bool FrameCache::contains(int64_t index) const
     return m_map.count(index) != 0;
 }
 
-void FrameCache::insert(int64_t index, Ptr image)
+void FrameCache::insert(int64_t index, Ptr frame)
 {
     std::lock_guard lock(m_mutex);
     auto it = m_map.find(index);
     if (it != m_map.end()) {
-        m_used -= sizeOf(it->second.image);
-        it->second.image = std::move(image);
-        m_used += sizeOf(it->second.image);
+        m_used -= sizeOf(it->second.frame);
+        it->second.frame = std::move(frame);
+        m_used += sizeOf(it->second.frame);
         m_lru.splice(m_lru.begin(), m_lru, it->second.pos);
     } else {
         m_lru.push_front(index);
-        m_used += sizeOf(image);
-        m_map.emplace(index, Entry{ std::move(image), m_lru.begin() });
+        m_used += sizeOf(frame);
+        m_map.emplace(index, Entry{ std::move(frame), m_lru.begin() });
     }
     evictLocked();
 }
@@ -76,7 +76,7 @@ void FrameCache::removeRange(int64_t base, int64_t count)
     std::lock_guard lock(m_mutex);
     for (auto it = m_map.begin(); it != m_map.end();) {
         if (it->first >= base && it->first < base + count) {
-            m_used -= sizeOf(it->second.image);
+            m_used -= sizeOf(it->second.frame);
             m_lru.erase(it->second.pos);
             it = m_map.erase(it);
         } else {
@@ -103,7 +103,7 @@ void FrameCache::evictLocked()
         const int64_t victim = m_lru.back();
         m_lru.pop_back();
         auto it = m_map.find(victim);
-        m_used -= sizeOf(it->second.image);
+        m_used -= sizeOf(it->second.frame);
         m_map.erase(it);
     }
 }

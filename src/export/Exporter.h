@@ -1,8 +1,12 @@
 #pragma once
 
+#include "analysis/AnalysisFilter.h"
 #include "media/AudioClip.h"
+#include "media/AudioMix.h"
 #include "model/Project.h"
 #include "model/Sequence.h"
+
+#include <QSet>
 
 #include <QImage>
 #include <QRectF>
@@ -55,6 +59,28 @@ struct ExportJob {
         double wipe = 0.5;
         bool audioFromB = false;
     } compare;
+
+    // 1.1 multi-track timeline: each frame is composed from its layers (bottom track first) on
+    // the timeline canvas, with the edited clip's annotations; the sound is the timeline's mix.
+    struct Layer {
+        QString sourceId;
+        int64_t local = 0;
+        QRectF rect;  // canvas pixels
+        double opacity = 1.0;
+        BlendMode blend = BlendMode::Normal;
+        bool primary = false;  // its annotations and tracks are drawn
+    };
+    bool timeline = false;
+    QSize canvas;
+    std::vector<std::vector<Layer>> layers;  // per exported frame (first..last)
+    std::shared_ptr<const AudioMix> mix;
+    double timelineFps = 24.0;
+    std::map<QString, QSet<QString>> hiddenNotes;  // objects on annotation lanes that are switched off
+
+    // The viewer's analysis filter, burned in (Filter menu).
+    AnalysisFilter filter;
+    double filterThreshold = 0.5;
+    std::map<QString, QImage> plates;  // background plates (moving silhouette)
 
     bool isSequence() const { return format >= Format::PngSequence; }
     int64_t frameCount() const { return last - first + 1; }

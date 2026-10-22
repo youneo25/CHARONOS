@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
-project(CHRONOS VERSION 0.0.1 LANGUAGES CXX)
-set(CHARONOS_DISPLAY_VERSION "Beta ${PROJECT_VERSION}")
-set(CHARONOS_PACKAGE_VERSION "${PROJECT_VERSION}-beta")
+project(CHRONOS VERSION 1.1.2 LANGUAGES CXX)
+set(CHARONOS_DISPLAY_VERSION "${PROJECT_VERSION}")
+set(CHARONOS_PACKAGE_VERSION "${PROJECT_VERSION}")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,7 +9,7 @@ set(CMAKE_AUTOMOC ON)
 
 set(FFMPEG_ROOT "C:/dev/ffmpeg" CACHE PATH "FFmpeg shared dev build (include/, lib/, bin/)")
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Svg)
+find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Svg Network)
 
 add_library(ffmpeg INTERFACE)
 target_include_directories(ffmpeg INTERFACE "${FFMPEG_ROOT}/include")
@@ -21,6 +21,7 @@ add_executable(CHRONOS WIN32
   src/main.cpp
   src/media/MediaInfo.h
   src/media/FrameSource.h
+  src/media/VideoFrame.h          src/media/VideoFrame.cpp
   src/media/VideoDecoder.h        src/media/VideoDecoder.cpp
   src/media/ImageSequenceSource.h src/media/ImageSequenceSource.cpp
   src/media/FrameCache.h          src/media/FrameCache.cpp
@@ -29,6 +30,7 @@ add_executable(CHRONOS WIN32
   src/media/AudioClip.h           src/media/AudioClip.cpp
   src/media/AudioEngine.h         src/media/AudioEngine.cpp
   src/media/AudioClock.h
+  src/media/AudioMix.h            src/media/AudioMix.cpp
   src/model/Sequence.h
   src/model/ReviewRange.h
   src/export/VideoEncoder.h       src/export/VideoEncoder.cpp
@@ -47,9 +49,18 @@ add_executable(CHRONOS WIN32
   src/model/Annotation.h          src/model/Annotation.cpp
   src/model/AnnotationPainter.h   src/model/AnnotationPainter.cpp
   src/model/Project.h             src/model/Project.cpp
+  src/model/TimelineModel.h       src/model/TimelineModel.cpp
+  src/model/NoteClips.h           src/model/NoteClips.cpp
+  src/analysis/AnalysisFilter.h   src/analysis/AnalysisFilter.cpp
   src/ui/Viewport.h               src/ui/Viewport.cpp
   src/ui/Timeline.h               src/ui/Timeline.cpp
   src/ui/MainWindow.h             src/ui/MainWindow.cpp
+  src/ui/MainWindowPanels.cpp
+  src/ui/MainWindowAi.cpp
+  src/ui/MainWindowTimeline.cpp
+  src/ui/TimelineEditor.h         src/ui/TimelineEditor.cpp
+  src/ui/MotionGraph.h            src/ui/MotionGraph.cpp
+  src/ai/McpServer.h              src/ai/McpServer.cpp
   src/ui/Style.h                  src/ui/Style.cpp
   src/FileAssociation.h           src/FileAssociation.cpp
   res/app.rc
@@ -62,11 +73,26 @@ target_compile_definitions(CHRONOS PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
 if(MSVC)
   target_compile_options(CHRONOS PRIVATE /utf-8 /W3 /permissive- /MP)
 endif()
-target_link_libraries(CHRONOS PRIVATE Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Svg ffmpeg winmm shell32)
+target_link_libraries(CHRONOS PRIVATE Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Svg Qt6::Network ffmpeg winmm shell32)
+
+# MCP stdio bridge for AI assistants (relays to the server built into CHARONOS)
+add_executable(charonos_mcp tools/charonos_mcp.cpp)
+set_target_properties(charonos_mcp PROPERTIES OUTPUT_NAME charonos-mcp)
+target_compile_definitions(charonos_mcp PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+if(MSVC)
+  target_compile_options(charonos_mcp PRIVATE /utf-8 /permissive-)
+endif()
+target_link_libraries(charonos_mcp PRIVATE Qt6::Core Qt6::Network)
+add_dependencies(CHRONOS charonos_mcp)
+
+# English user guide next to the exe (Help > User Guide)
+add_custom_command(TARGET CHRONOS POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:CHRONOS>/docs
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/docs/CHARONOS-User-Guide.html" $<TARGET_FILE_DIR:CHRONOS>/docs/)
 
 # Frame-exactness verification tool (console)
 add_executable(frame_verify tools/frame_verify.cpp
-  src/media/VideoDecoder.cpp src/media/VideoDecoder.h)
+  src/media/VideoDecoder.cpp src/media/VideoDecoder.h src/media/VideoFrame.cpp)
 target_include_directories(frame_verify PRIVATE src)
 target_compile_definitions(frame_verify PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 if(MSVC)
@@ -76,7 +102,7 @@ target_link_libraries(frame_verify PRIVATE Qt6::Core Qt6::Gui ffmpeg)
 
 # Korean translation for Qt's built-in dialogs
 add_executable(playback_probe tools/playback_probe.cpp
-  src/media/VideoDecoder.cpp src/media/FrameCache.cpp src/media/FrameServer.cpp src/media/FrameServer.h)
+  src/media/VideoDecoder.cpp src/media/VideoFrame.cpp src/media/FrameCache.cpp src/media/FrameServer.cpp src/media/FrameServer.h)
 target_include_directories(playback_probe PRIVATE src)
 target_compile_definitions(playback_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 if(MSVC)
@@ -102,7 +128,7 @@ add_custom_command(TARGET CHRONOS POST_BUILD
 
 # Tracker accuracy test (console)
 add_executable(track_test tools/track_test.cpp src/track/Tracker.cpp
-  src/media/VideoDecoder.cpp src/media/VideoDecoder.h)
+  src/media/VideoDecoder.cpp src/media/VideoDecoder.h src/media/VideoFrame.cpp)
 target_include_directories(track_test PRIVATE src)
 target_compile_definitions(track_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 if(MSVC)
@@ -119,7 +145,7 @@ endif()
 target_link_libraries(pressure_test PRIVATE Qt6::Gui)
 
 # Audio decode / clock check (console)
-add_executable(audio_test tools/audio_test.cpp src/media/AudioClip.cpp src/media/AudioEngine.cpp src/media/VideoDecoder.cpp)
+add_executable(audio_test tools/audio_test.cpp src/media/AudioClip.cpp src/media/AudioEngine.cpp src/media/AudioMix.cpp src/media/VideoDecoder.cpp src/media/VideoFrame.cpp)
 target_include_directories(audio_test PRIVATE src)
 target_compile_definitions(audio_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 if(MSVC)
@@ -138,7 +164,7 @@ if(BUILD_FEATURE_TESTS)
   if(MSVC)
     target_compile_options(feature_regression PRIVATE /utf-8 /permissive-)
   endif()
-  target_link_libraries(feature_regression PRIVATE Qt6::Test Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Svg ffmpeg winmm shell32)
+  target_link_libraries(feature_regression PRIVATE Qt6::Test Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Svg Qt6::Network ffmpeg winmm shell32)
   enable_testing()
   add_test(NAME feature_regression COMMAND feature_regression)
 endif()

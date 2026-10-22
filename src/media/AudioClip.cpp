@@ -16,7 +16,7 @@ QString avError(int code)
 }
 } // namespace
 
-std::shared_ptr<AudioClip> AudioClip::decode(const QString& path, QString* error)
+std::shared_ptr<AudioClip> AudioClip::decode(const QString& path, QString* error, const std::atomic<bool>* cancel)
 {
     AVFormatContext* fmt = nullptr;
     AVCodecContext* dec = nullptr;
@@ -66,9 +66,16 @@ std::shared_ptr<AudioClip> AudioClip::decode(const QString& path, QString* error
         return {};
     }
 
+    const double seconds = st->duration > 0                 ? av_q2d(st->time_base) * st->duration
+                           : fmt->duration > 0              ? fmt->duration / double(AV_TIME_BASE)
+                                                            : 0.0;
+    if (seconds > kMaxSeconds) {
+        if (error) *error = QStringLiteral("Soundtrack longer than %1 hours is not loaded").arg(kMaxSeconds / 3600.0);
+        cleanup();
+        return {};
+    }
     auto clip = std::make_shared<AudioClip>();
-    if (dec->sample_rate > 0 && st->duration > 0)
-        clip->pcm.reserve(size_t(av_q2d(st->time_base) * st->duration * kRate * 2) + 4096);
+    if (dec->sample_rate > 0 && seconds > 0) clip->pcm.reserve(size_t(seconds * kRate * 2) + 4096);
 
     // Where the first sample sits on the container clock (shared with the video's frame times).
     // Taken from the first decoded frame, i.e. after the decoder dropped AAC/MP3 priming samples.
@@ -92,6 +99,11 @@ std::shared_ptr<AudioClip> AudioClip::decode(const QString& path, QString* error
     };
 
     while (av_read_frame(fmt, pkt) >= 0) {
+        if (cancel && cancel->load()) {
+            av_packet_unref(pkt);
+            cleanup();
+            return {};
+        }
         if (pkt->stream_index == stream && avcodec_send_packet(dec, pkt) >= 0)
             while (avcodec_receive_frame(dec, frame) >= 0) convert(frame);
         av_packet_unref(pkt);

@@ -4,7 +4,9 @@
 #include "FrameSource.h"
 
 #include <QObject>
+#include <QVector>
 
+#include <atomic>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -32,6 +34,8 @@ public:
 
     void request(int64_t index, bool playing, int64_t rangeStart, int64_t rangeEnd);
     void setIdle();  // stop background filling (another source is active)
+    void requestExtra(QVector<int64_t> frames);  // onion-skin ghost frames (replaces the previous list)
+    void requestPoster(int64_t frame);           // one frame for a timeline thumbnail
 
 signals:
     void frameReady(qint64 index);
@@ -45,7 +49,7 @@ private:
     std::shared_ptr<FrameCache> m_cache;
     int64_t m_keyBase = 0;
     MediaInfo m_info;
-    qint64 m_frameBytes = 0;
+    std::atomic<qint64> m_frameBytes{ 0 };  // bytes of one cached frame (updated after decoding)
 
     std::vector<std::thread> m_workers;
     std::mutex m_mutex;
@@ -57,6 +61,8 @@ private:
     int64_t m_rangeStart = 0;
     int64_t m_rangeEnd = -1;
     int64_t m_fillCursor = 0;
+    QVector<int64_t> m_extra;
+    int64_t m_poster = -1;
     std::unordered_set<int64_t> m_inFlight;
     std::unordered_set<int64_t> m_failed;
 };

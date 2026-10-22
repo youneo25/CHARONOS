@@ -1,6 +1,6 @@
 // Verifies frame-exact access: decodes every frame sequentially, then again in random
 // order (forcing seeks), and checks that each frame index yields identical pixels.
-//   frame_verify <video> [randomSamples]
+//   frame_verify <video> [randomSamples] [--cpu]
 #include "media/VideoDecoder.h"
 
 #include <QCoreApplication>
@@ -21,8 +21,10 @@ static QByteArray hashOf(const QImage& img)
 int main(int argc, char* argv[])
 {
     QCoreApplication app(argc, argv);
+    for (int i = 1; i < argc; ++i)
+        if (QByteArray(argv[i]) == "--cpu") VideoDecoder::setHardwareDecodingEnabled(false), argv[i] = argv[argc - 1], --argc;
     if (argc < 2) {
-        std::printf("usage: frame_verify <video> [randomSamples]\n");
+        std::printf("usage: frame_verify <video> [randomSamples] [--cpu]\n");
         return 2;
     }
     const QString path = QString::fromLocal8Bit(argv[1]);
@@ -40,6 +42,7 @@ int main(int argc, char* argv[])
     std::printf("%dx%d  %.3f fps  %lld frames  %s %s%s  (index %.0f ms)\n", info.width, info.height, info.fps,
                 (long long)info.frameCount, qPrintable(info.codec), qPrintable(info.pixelFormat),
                 info.variableFrameRate ? "  VFR" : "", t.nsecsElapsed() / 1e6);
+    std::printf("decoder: %s\n", qPrintable(info.decoderName));
 
     std::vector<QByteArray> seq(size_t(info.frameCount));
     QImage img;
