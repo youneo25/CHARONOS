@@ -92,7 +92,7 @@ void Timeline::paintEvent(QPaintEvent*)
     const QRectF rr = rateRect();
     p.setPen(Pal::text);
     p.drawText(m_stepped ? rr : rr.adjusted(0, 0, -36, 0), Qt::AlignRight | Qt::AlignVCenter,
-               m_stepped ? L("Stepped", "단계 재생") : QString::number(m_target, 'f', 2));
+               m_stepped ? (m_stepLabel.isEmpty() ? L("Stepped", "단계 재생") : m_stepLabel) : QString::number(m_target, 'f', 2));
     p.setPen(m_measured > 0 && m_measured < m_target * 0.97 ? Pal::accent : Pal::textFaint);
     if (!m_stepped) p.drawText(rr, Qt::AlignRight | Qt::AlignVCenter,
                m_measured > 0 ? QString::number(m_measured, 'f', 1) : QStringLiteral("fps"));
@@ -229,9 +229,10 @@ ClipBar::ClipBar(QWidget* parent)
                  "빨간 눈금: 주석 / 편집 / 트래킹 키 위치. 연한 초록 프레임 숫자: 표시된 키 위.\n우클릭: 구간 반복 및 재생 옵션."));
 }
 
-void ClipBar::setClip(const QString& name, qint64 count, qint64 local, qint64 offset)
+void ClipBar::setClip(const QString& name, qint64 count, qint64 local, qint64 offset, qint64 firstLabel)
 {
-    if (name == m_name && count == m_count && local == m_local && offset == m_offset) return;
+    if (name == m_name && count == m_count && local == m_local && offset == m_offset && firstLabel == m_firstLabel) return;
+    m_firstLabel = firstLabel;
     m_name = name;
     m_count = count;
     m_local = local;
@@ -285,8 +286,8 @@ void ClipBar::paintEvent(QPaintEvent*)
 
     p.setFont(monoFont(10));
     p.setPen(Pal::textFaint);
-    p.drawText(QRectF(0, l.top() - 8, l.left() - 8, 16), Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("0"));
-    p.drawText(QRectF(l.right() + 8, l.top() - 8, 50, 16), Qt::AlignLeft | Qt::AlignVCenter, QString::number(m_count - 1));
+    p.drawText(QRectF(0, l.top() - 8, l.left() - 8, 16), Qt::AlignRight | Qt::AlignVCenter, QString::number(m_firstLabel));
+    p.drawText(QRectF(l.right() + 8, l.top() - 8, 50, 16), Qt::AlignLeft | Qt::AlignVCenter, QString::number(m_firstLabel + m_count - 1));
 
     const double x = m_count <= 1 ? l.left() : l.left() + l.width() * (m_local / double(m_count - 1));
     p.setPen(Qt::NoPen);
@@ -295,7 +296,7 @@ void ClipBar::paintEvent(QPaintEvent*)
 
     p.setFont(monoFont(11));
     p.setPen(std::binary_search(m_keys.begin(), m_keys.end(), m_offset + m_local) ? Pal::reviewActive : Pal::text);
-    const QString label = QString::number(m_local);
+    const QString label = QString::number(m_firstLabel + m_local);
     const double w = QFontMetricsF(p.font()).horizontalAdvance(label);
     p.drawText(QPointF(std::clamp(x - w / 2, l.left() - 8, l.right() - w + 8), 13), label);
 

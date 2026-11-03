@@ -16,7 +16,39 @@ void FrameCache::setBudget(qint64 bytes)
 qint64 FrameCache::budget() const
 {
     std::lock_guard lock(m_mutex);
+    return limitLocked();
+}
+
+qint64 FrameCache::configuredBudget() const
+{
+    std::lock_guard lock(m_mutex);
     return m_budget;
+}
+
+void FrameCache::setPressureLimit(qint64 bytes)
+{
+    std::lock_guard lock(m_mutex);
+    m_pressure = bytes > 0 ? std::max<qint64>(bytes, qint64(64) << 20) : 0;
+    evictLocked();
+}
+
+qint64 FrameCache::pressureLimit() const
+{
+    std::lock_guard lock(m_mutex);
+    return m_pressure;
+}
+
+void FrameCache::trimTo(qint64 bytes)
+{
+    std::lock_guard lock(m_mutex);
+    while (m_used > bytes && !m_lru.empty()) {
+        const int64_t victim = m_lru.back();
+        m_lru.pop_back();
+        auto it = m_map.find(victim);
+        m_used -= sizeOf(it->second.frame);
+        m_map.erase(it);
+        ++m_revision;
+    }
 }
 
 qint64 FrameCache::usedBytes() const
@@ -28,7 +60,7 @@ qint64 FrameCache::usedBytes() const
 bool FrameCache::hasRoomFor(qint64 bytes) const
 {
     std::lock_guard lock(m_mutex);
-    return m_used + bytes <= m_budget;
+    return m_used + bytes <= limitLocked();
 }
 
 FrameCache::Ptr FrameCache::get(int64_t index)
@@ -37,7 +69,7 @@ FrameCache::Ptr FrameCache::get(int64_t index)
     auto it = m_map.find(index);
     if (it == m_map.end()) return {};
     m_lru.splice(m_lru.begin(), m_lru, it->second.pos);
-    return it->second.image;
+    return it->second.frame;
 }
 
 bool FrameCache::contains(int64_t index) const
@@ -46,20 +78,21 @@ bool FrameCache::contains(int64_t index) const
     return m_map.count(index) != 0;
 }
 
-void FrameCache::insert(int64_t index, Ptr image)
+void FrameCache::insert(int64_t index, Ptr frame)
 {
     std::lock_guard lock(m_mutex);
     auto it = m_map.find(index);
     if (it != m_map.end()) {
-        m_used -= sizeOf(it->second.image);
-        it->second.image = std::move(image);
-        m_used += sizeOf(it->second.image);
+        m_used -= sizeOf(it->second.frame);
+        it->second.frame = std::move(frame);
+        m_used += sizeOf(it->second.frame);
         m_lru.splice(m_lru.begin(), m_lru, it->second.pos);
     } else {
         m_lru.push_front(index);
-        m_used += sizeOf(image);
-        m_map.emplace(index, Entry{ std::move(image), m_lru.begin() });
+        m_used += sizeOf(frame);
+        m_map.emplace(index, Entry{ std::move(frame), m_lru.begin() });
     }
+    ++m_revision;
     evictLocked();
 }
 
@@ -69,6 +102,7 @@ void FrameCache::clear()
     m_map.clear();
     m_lru.clear();
     m_used = 0;
+    ++m_revision;
 }
 
 void FrameCache::removeRange(int64_t base, int64_t count)
@@ -76,9 +110,10 @@ void FrameCache::removeRange(int64_t base, int64_t count)
     std::lock_guard lock(m_mutex);
     for (auto it = m_map.begin(); it != m_map.end();) {
         if (it->first >= base && it->first < base + count) {
-            m_used -= sizeOf(it->second.image);
+            m_used -= sizeOf(it->second.frame);
             m_lru.erase(it->second.pos);
             it = m_map.erase(it);
+            ++m_revision;
         } else {
             ++it;
         }
@@ -99,11 +134,13 @@ QBitArray FrameCache::mask(int64_t base, int64_t frameCount) const
 void FrameCache::evictLocked()
 {
     // Never evict the most recently inserted frame, even if it alone exceeds the budget.
-    while (m_used > m_budget && m_lru.size() > 1) {
+    const qint64 limit = limitLocked();
+    while (m_used > limit && m_lru.size() > 1) {
         const int64_t victim = m_lru.back();
         m_lru.pop_back();
         auto it = m_map.find(victim);
-        m_used -= sizeOf(it->second.image);
+        m_used -= sizeOf(it->second.frame);
         m_map.erase(it);
+        ++m_revision;
     }
 }

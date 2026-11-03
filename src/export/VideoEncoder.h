@@ -30,6 +30,7 @@ public:
 
 private:
     bool drain(AVCodecContext* enc, AVStream* st, QString* error);
+    bool flush(AVCodecContext* enc, AVStream* st, QString* error);  // after end of stream: until EOF
     bool encodeAudio(bool flush, QString* error);
     void cleanup();
 

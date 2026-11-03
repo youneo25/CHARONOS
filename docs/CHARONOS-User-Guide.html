@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CHARONOS 1.0 User Guide</title>
+<style>
+:root {
+  --bg: #1b1b1a; --panel: #242422; --raised: #2e2e2b; --border: #3a3936; --text: #e5e3db; --strong: #faf9f5;
+  --dim: #a3a097; --faint: #77746c; --accent: #d97757; --accent-soft: rgba(217,119,87,.14); --ok: #7cc48a; --warn: #f2c94c;
+  --code: #2a2a27; --link: #e8a58b;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #faf9f5; --panel: #ffffff; --raised: #f2f0ea; --border: #dedad0; --text: #2b2a27; --strong: #121211;
+    --dim: #5f5c55; --faint: #8b877e; --accent: #c15f3c; --accent-soft: rgba(193,95,60,.10); --ok: #2f8a46; --warn: #a77a00;
+    --code: #f2f0ea; --link: #b04f2e;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #faf9f5; --panel: #ffffff; --raised: #f2f0ea; --border: #dedad0; --text: #2b2a27; --strong: #121211;
+  --dim: #5f5c55; --faint: #8b877e; --accent: #c15f3c; --accent-soft: rgba(193,95,60,.10); --ok: #2f8a46; --warn: #a77a00;
+  --code: #f2f0ea; --link: #b04f2e;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.62 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif; }
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, kbd, .mono { font-family: "Cascadia Mono", Consolas, ui-monospace, monospace; }
+code { background: var(--code); border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; font-size: .88em; }
+pre { background: var(--code); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+pre code { background: none; border: 0; padding: 0; }
+kbd { display: inline-block; min-width: 1.6em; padding: 1px 6px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px;
+      background: var(--raised); color: var(--strong); font-size: .82em; line-height: 1.5; text-align: center; white-space: nowrap; }
+.layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); max-width: 1320px; margin: 0 auto; }
+nav.toc { position: sticky; top: 0; height: 100vh; overflow-y: auto; padding: 28px 18px 40px 24px; border-right: 1px solid var(--border); }
+nav.toc .brand { font-weight: 700; letter-spacing: .14em; color: var(--strong); font-size: 15px; }
+nav.toc .ver { color: var(--faint); font-size: 12px; margin-bottom: 14px; }
+nav.toc input { width: 100%; padding: 7px 10px; margin: 6px 0 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font: inherit; font-size: 13px; }
+nav.toc ol { list-style: none; margin: 0; padding: 0; counter-reset: sec; }
+nav.toc li { margin: 1px 0; }
+nav.toc a { display: block; padding: 4px 8px; border-radius: 6px; color: var(--dim); font-size: 13.5px; }
+nav.toc a:hover { background: var(--raised); color: var(--text); text-decoration: none; }
+nav.toc a.active { color: var(--strong); background: var(--accent-soft); }
+nav.toc .theme { margin-top: 18px; display: flex; gap: 6px; }
+nav.toc .theme button { flex: 1; padding: 5px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--dim); cursor: pointer; font: inherit; font-size: 12px; }
+main { padding: 36px 56px 90px; min-width: 0; }
+header.hero { padding: 6px 0 26px; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+header.hero h1 { font-size: 34px; line-height: 1.15; margin: 0 0 8px; color: var(--strong); letter-spacing: -.01em; }
+header.hero p { color: var(--dim); margin: 0; max-width: 760px; font-size: 16px; }
+.pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.pill { font-size: 12px; padding: 3px 10px; border-radius: 99px; border: 1px solid var(--border); color: var(--dim); background: var(--panel); }
+section { padding-top: 26px; }
+h2 { font-size: 23px; color: var(--strong); margin: 22px 0 10px; padding-top: 4px; letter-spacing: -.005em; }
+h2 .n { color: var(--accent); font-weight: 600; margin-right: 8px; }
+h3 { font-size: 17px; color: var(--strong); margin: 22px 0 6px; }
+p { margin: 8px 0 12px; max-width: 860px; }
+ul, ol { max-width: 860px; padding-left: 22px; }
+li { margin: 3px 0; }
+.callout { border: 1px solid var(--border); border-left: 3px solid var(--accent); background: var(--panel); border-radius: 8px; padding: 10px 14px; margin: 14px 0; max-width: 860px; }
+.callout.tip { border-left-color: var(--ok); }
+.callout.warn { border-left-color: var(--warn); }
+.callout b:first-child { color: var(--strong); }
+table { border-collapse: collapse; width: 100%; max-width: 920px; margin: 10px 0 18px; font-size: 14px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--faint); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; background: var(--panel); }
+td:first-child { white-space: nowrap; }
+.keys td:first-child { width: 220px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; max-width: 980px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; }
+.card h4 { margin: 2px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent); }
+.card table { margin: 0; font-size: 13.5px; }
+.card td { padding: 4px 0; border: 0; }
+.card td:last-child { text-align: right; }
+.diagram { font-family: "Cascadia Mono", Consolas, monospace; font-size: 12.5px; line-height: 1.35; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; overflow-x: auto; color: var(--dim); white-space: pre; }
+.steps { counter-reset: step; list-style: none; padding-left: 0; }
+.steps li { counter-increment: step; position: relative; padding-left: 36px; margin: 9px 0; }
+.steps li::before { content: counter(step); position: absolute; left: 0; top: 1px; width: 24px; height: 24px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 13px; display: grid; place-items: center; }
+.hidden-by-search { display: none !important; }
+footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border); color: var(--faint); font-size: 13px; }
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  nav.toc { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border); padding: 18px 16px; }
+  main { padding: 22px 16px 70px; }
+  header.hero h1 { font-size: 27px; }
+  td:first-child { white-space: normal; }
+}
+@media print { nav.toc { display: none; } .layout { display: block; } main { padding: 0; } }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav class="toc" aria-label="Contents">
+  <div class="brand">CHARONOS</div>
+  <div class="ver">User Guide · version 1.1</div>
+  <input id="search" type="search" placeholder="Search the guide…" aria-label="Search the guide">
+  <ol id="toc">
+    <li><a href="#start">Getting started</a></li>
+    <li><a href="#interface">The interface</a></li>
+    <li><a href="#media">Media and projects</a></li>
+    <li><a href="#playback">Playback and navigation</a></li>
+    <li><a href="#timeline">Timeline (multi-track)</a></li>
+    <li><a href="#annotate">Drawing and annotations</a></li>
+    <li><a href="#onion">Onion skin</a></li>
+    <li><a href="#compare">A/B compare</a></li>
+    <li><a href="#tracking">Motion tracking</a></li>
+    <li><a href="#graph">Motion Graph and key poses</a></li>
+    <li><a href="#notes">Frame notes</a></li>
+    <li><a href="#viewing">Viewing aids</a></li>
+    <li><a href="#filters">Analysis filters</a></li>
+    <li><a href="#window">Window menu and layout</a></li>
+    <li><a href="#export">Exporting</a></li>
+    <li><a href="#performance">Performance, GPU and NVDEC</a></li>
+    <li><a href="#ai">AI assistants (MCP)</a></li>
+    <li><a href="#workflows">Animator workflows</a></li>
+    <li><a href="#shortcuts">Keyboard shortcuts</a></li>
+    <li><a href="#troubleshooting">Troubleshooting</a></li>
+    <li><a href="#whatsnew">What's new in 1.1</a></li>
+  </ol>
+  <div class="theme" role="group" aria-label="Theme">
+    <button data-set="auto">Auto</button><button data-set="dark">Dark</button><button data-set="light">Light</button>
+  </div>
+</nav>
+
+<main>
+<header class="hero">
+  <h1>CHARONOS 1.1 User Guide</h1>
+  <p>CHARONOS is a frame-accurate reference player for animators. Load video or image sequences, lay them out on a multi-track timeline, study timing and spacing frame by frame, draw over the picture, read motion through silhouette filters, track motion, compare takes side by side, and keep review notes — with GPU-accelerated playback and an AI assistant connection built in.</p>
+  <div class="pills"><span class="pill">Windows 10 / 11 · x64</span><span class="pill">Frame-exact decoding</span><span class="pill">Multi-track timeline</span><span class="pill">Silhouette analysis</span><span class="pill">NVDEC + GPU colour conversion</span><span class="pill">Built-in MCP server</span></div>
+</header>
+
+<section id="start">
+<h2><span class="n">1</span>Getting started</h2>
+<h3>Install</h3>
+<p>Run <code>CHARONOS-1.0.0-Setup-x64.exe</code>. No administrator rights are needed; the default location is <code>%LOCALAPPDATA%\Programs\CHARONOS</code>. Qt, FFmpeg and the Microsoft C++ runtime are included. Uninstall from Windows Settings › Apps or with <code>unins000.exe</code> in the install folder — your projects are never removed.</p>
+<h3>Your first review in one minute</h3>
+<ol class="steps">
+  <li>Drag a video, an image sequence (drop any one frame) or a whole folder onto the window, or use <b>File › Import Media</b> <kbd>Ctrl</kbd>+<kbd>I</kbd>.</li>
+  <li>Press <kbd>Space</kbd> to play. Step with <kbd>←</kbd> / <kbd>→</kbd>; hold <kbd>Alt</kbd> and drag anywhere on the picture to scrub.</li>
+  <li>Pick the pencil <kbd>P</kbd> and draw on the frame. A drawing holds until the next drawing key.</li>
+  <li>Press <kbd>K</kbd> to bookmark key poses, then <kbd>Ctrl</kbd>+<kbd>Space</kbd> to play only those poses.</li>
+  <li>Save the project with <kbd>Ctrl</kbd>+<kbd>S</kbd> (<code>.frvm</code>). Your media is referenced, not copied.</li>
+</ol>
+<div class="callout tip"><b>Tip.</b> Press <kbd>F1</kbd> at any time for the shortcut sheet. It always shows your current keys, including the ones you changed in <b>Tools › HotKey Manager</b>.</div>
+<p>The interface language is English by default; switch to Korean in <b>Tools › Language / 언어</b> (restart to apply).</p>
+</section>
+
+<section id="interface">
+<h2><span class="n">2</span>The interface</h2>
+<div class="diagram">┌ Menu: File  Edit  Playback  Audio  Video  Bookmarks  Tracking  Tools  Window  Help ───────────────┐
+│ Project View   │ T │ Clip bar — the current clip's frames, review keys, bookmarks                     │
+│  SOURCES       │ o │                                                                                │
+│  TIMELINES     │ o │ Viewer (OpenGL) — picture, drawings, tracks, onion skin, A/B compare           │
+├────────────────┤ l │                                                                                │
+│ Sources │ Prop. │ s │ Scrub bar — whole sequence, cached frames, In/Out, marks, waveform, FPS         │
+├────────────────┴───┴────────────────────────────────────────────────────────────────────────────────┤
+│ panels · compare · timecode      ⏮  ⇤  ‹  ▶  ›  ⇥  ⏭  loop               volume · zoom · fit          │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Optional docks (Window menu): Timeline · Frame Notes · Motion Graph · Tracking Manager · Console        │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────┘</div>
+<table>
+<tr><th>Area</th><th>What it does</th></tr>
+<tr><td>Project View</td><td>Every source in the project, grouped in folders, plus the timeline. Double-click a source to view it on its own; double-click the timeline to return. The <b>A</b> / <b>B</b> badges pick the compare sides.</td></tr>
+<tr><td>Sources / Properties</td><td>The clips on the timeline in playback order (drag to reorder) and the properties of the clip under the playhead: resolution, codec, pixel format, decoder (NVDEC or CPU), frame rate, clip range and audio.</td></tr>
+<tr><td>Tool strip</td><td>Select, pen (pencil / pen / highlighter), eraser, text, arrow, line, rectangle, ellipse, tracker, colour, stroke, onion skin, undo / redo, clear.</td></tr>
+<tr><td>Clip bar</td><td>The current clip's own frame range with the playhead. Red ticks mark annotation, edit and tracking keys; the frame number turns mint on a key.</td></tr>
+<tr><td>Scrub bar</td><td>The whole sequence: cached frames (grey), clip boundaries, In/Out range, bookmarks, review keys and the audio waveform. Click the FPS readout to change the playback rate.</td></tr>
+<tr><td>Transport</td><td>Panel toggles, compare menu, timecode and frame number, play controls, loop, volume and zoom.</td></tr>
+</table>
+<p>Every panel can be closed with its <b>×</b>. Bring any of them back from the <a href="#window">Window menu</a>.</p>
+</section>
+
+<section id="media">
+<h2><span class="n">3</span>Media and projects</h2>
+<h3>Supported media</h3>
+<ul>
+  <li><b>Video</b>: MP4, MOV, M4V, MKV, AVI, WebM, MXF, WMV, MPEG and GIF — anything FFmpeg decodes, including H.264, H.265/HEVC, AV1, VP9 and ProRes. Variable-frame-rate phone and screen recordings are handled exactly: frame N is always the N-th picture.</li>
+  <li><b>Image sequences</b>: PNG, JPEG, TIFF, BMP, WebP, TGA. Import one numbered frame and the whole sequence is found (<code>shot_0001.png</code>, <code>shot_0002.png</code>…).</li>
+  <li><b>2D canvas</b>: <b>File › New Project</b>, type <i>2D Animation</i> (or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd>) creates a blank canvas of any size, length and frame rate for drawing animation without video.</li>
+</ul>
+<h3>Importing</h3>
+<p>Drop files or folders on the window, the Project View, the Sources list or the Timeline panel. <b>Import Folder</b> <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> brings in a folder tree and keeps its folders in the Project View. New sources are added to the end of the timeline.</p>
+<h3>Projects</h3>
+<p>A project (<code>.frvm</code>, JSON) stores your sources, timeline and trims, drawings, bookmarks, frame notes, tracks and settings. Media paths are saved absolute and relative to the project, so a project folder can be moved together with its media. If a file is missing when you open a project, CHARONOS asks you to locate it. Older <code>.frvm</code> files and Electron-era <code>.json</code> projects open as well; 1.0 projects stay readable by earlier builds (they ignore trims and notes).</p>
+</section>
+
+<section id="playback">
+<h2><span class="n">4</span>Playback and navigation</h2>
+<p>Decoding is frame-exact: every frame number maps to one presentation timestamp, so stepping, seeking and exporting always land on the same picture.</p>
+<table class="keys">
+<tr><th>Action</th><th>How</th></tr>
+<tr><td>Play / pause</td><td><kbd>Space</kbd> — playback continues from the frame on screen.</td></tr>
+<tr><td>Step one frame</td><td><kbd>←</kbd> / <kbd>→</kbd>; ten frames with <kbd>Shift</kbd>.</td></tr>
+<tr><td>First / last frame</td><td><kbd>Home</kbd> / <kbd>End</kbd></td></tr>
+<tr><td>Previous / next clip</td><td><kbd>↑</kbd> / <kbd>↓</kbd></td></tr>
+<tr><td>Scrub</td><td><kbd>Alt</kbd>+drag anywhere (add <kbd>Shift</kbd> for fine control), or drag on the clip bar, scrub bar or timeline ruler. With <i>Endless Scrubbing</i> on (Tools menu) the pointer wraps at the screen edge.</td></tr>
+<tr><td>In / Out loop</td><td><kbd>I</kbd> and <kbd>O</kbd> set the range, <kbd>Ctrl</kbd>+<kbd>L</kbd> toggles looping, <kbd>Alt</kbd>+<kbd>X</kbd> clears it.</td></tr>
+<tr><td>Bookmarks</td><td><kbd>K</kbd> toggles a bookmark; <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>→</kbd> jump between them.</td></tr>
+<tr><td>Stepped playback</td><td><kbd>Ctrl</kbd>+<kbd>Space</kbd> plays only the bookmarked frames, each held until the next — a quick way to read key poses or pose-to-pose timing. Sound is muted while stepping.</td></tr>
+<tr><td>Play on 2s / 3s / 4s</td><td><kbd>Alt</kbd>+<kbd>2</kbd> / <kbd>3</kbd> / <kbd>4</kbd> holds every 2nd, 3rd or 4th frame of the play range, showing how the motion reads when animated on twos or threes. The scrub bar shows <i>On 2s</i>.</td></tr>
+<tr><td>Playback speed</td><td><b>Playback › Playback Speed</b> (¼×–2×) or click the FPS readout to type any rate. Sound follows the speed like tape.</td></tr>
+<tr><td>Annotation keys</td><td><kbd>,</kbd> / <kbd>.</kbd> previous / next drawn frame; <kbd>Shift</kbd>+<kbd>,</kbd> / <kbd>Shift</kbd>+<kbd>.</kbd> previous / next edit key (drawings, erased keys and hand-placed tracking keys).</td></tr>
+</table>
+<h3>Audio</h3>
+<p>Sound is decoded once and played through the default Windows output. While sound plays, the sound card is the clock, so the picture always shows the frame you hear. <b>Audio › Scrub Audio</b> plays a short slice for every frame you step to. Use <b>Audio Offset</b> to compensate a Bluetooth or HDMI delay. Mute with <kbd>Ctrl</kbd>+<kbd>M</kbd>, change the volume with <kbd>Ctrl</kbd>+<kbd>↑</kbd> / <kbd>↓</kbd>.</p>
+<div class="callout"><b>Frames skip?</b> <b>Playback › Skip Frames to Keep Up</b> is off by default so every frame is shown, even if playback has to slow down. Turn it on to keep real time on slow machines.</div>
+</section>
+
+<section id="timeline">
+<h2><span class="n">5</span>Timeline (multi-track editing)</h2>
+<p>Open it with <b>Window › Timeline</b> <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>3</kbd> (or <b>Timeline › Show Timeline</b>). It works like the timeline of an editing program: clips sit at exact frames on tracks, empty space between them stays where you leave it, and <b>higher tracks are always drawn over lower ones</b> in the viewer and in exports.</p>
+<div class="diagram"> 36  │0         10         20         30   ▼     40         50         60          ← ruler (click / drag to scrub)
+ ───┼──────────────────────────────────────┼────────────────────────────────────────
+ N2 │                     ▐▭ Shape                       ▌                         ← annotation lanes (higher = on top)
+ N1 │       ▐✎ Drawing   ▌▐T Arc peak                    ▌
+ V2 │                                ▐ Ref inset · PiP 35% ▌                       ← drawn over V1
+ V1 │▐ walk_ref.mp4  0–47                      ▌        ▐ take_02.mp4 0–47     ▌    ← a gap is kept
+ ═══╪════════════════════════════════════════════════════════════════════════════
+ A1 │▐▁▂▃▅▃▂▁▁▂▂▁▂▃▂▁▁▂▃▅▃▂▁ ─ gain ─           ▌                                 ← sound clips, linked
+ A2 │                                ▐╱▁▂▃▂▁ -6 dB ▁▂╲▌                           ← fades, gain line</div>
+<h3>Tracks</h3>
+<p>From the top: <b>annotation lanes</b> (N1, N2 …) where every drawing, text or shape is a clip; <b>video tracks</b> (V1 at the bottom, V2 above it …); and below the centre line the <b>audio tracks</b> (A1, A2 …). The clip whose drawings you see and edit is the top visible one at the playhead; a picture-in-picture inset on a higher track leaves the full-frame clip under it editable.</p>
+<table class="keys">
+<tr><th>Track switch</th><th>What it does</th></tr>
+<tr><td>Eye</td><td>Shows or hides a video track or an annotation lane (in the viewer and in exports).</td></tr>
+<tr><td>Lock</td><td>Nothing on the track can be moved, trimmed, cut or deleted; ripple edits leave it alone.</td></tr>
+<tr><td><b>M</b> / <b>S</b></td><td>Mute or solo an audio track. With any track soloed, only soloed tracks are heard.</td></tr>
+<tr><td>Right-click a header</td><td>Rename, add or delete a track, track gain (audio), add an annotation lane.</td></tr>
+</table>
+<h3>Tools and modes</h3>
+<table class="keys">
+<tr><th>Tool / mode</th><th>How</th></tr>
+<tr><td>Selection tool</td><td><kbd>V</kbd> or <kbd>A</kbd> in the timeline. Click a clip, <kbd>Shift</kbd>/<kbd>Ctrl</kbd>+click to add, drag on empty space for a marquee.</td></tr>
+<tr><td>Blade tool</td><td><kbd>B</kbd> or <kbd>C</kbd> in the timeline. Click a clip to cut it there; <kbd>Shift</kbd>+click cuts every unlocked track.</td></tr>
+<tr><td>Ripple editing</td><td>Toolbar button or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>. Off: moves overwrite, trims stop at the neighbour, deleting leaves a gap. On: later clips follow every move, trim and delete. Holding <kbd>Ctrl</kbd> while you drag does the opposite of the current mode.</td></tr>
+<tr><td>Snapping</td><td><kbd>S</kbd> in the timeline. Edges snap to the playhead, In / Out, clip edges and annotation clips (a yellow line shows the snap).</td></tr>
+<tr><td>Linked selection</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd>. A clip's picture and sound move, trim and cut together. <kbd>Alt</kbd>+click picks one side only.</td></tr>
+</table>
+<h3>Editing</h3>
+<table class="keys">
+<tr><th>Do this</th><th>How</th></tr>
+<tr><td>Move</td><td>Drag a clip. Drag it up or down to another track; drag a video clip above the top track to create a new one. <kbd>Alt</kbd>+drag duplicates.</td></tr>
+<tr><td>Trim</td><td>Drag a clip's left or right edge. The tooltip shows the new In / Out and the change in frames.</td></tr>
+<tr><td>Cut</td><td><kbd>Ctrl</kbd>+<kbd>B</kbd> cuts the selected clips at the playhead (or every unlocked track there when nothing is selected), or use the Blade tool. Drawings stay on both halves because they belong to the source.</td></tr>
+<tr><td>Delete</td><td><kbd>Delete</kbd> removes the selection and leaves a gap; <kbd>Shift</kbd>+<kbd>Delete</kbd> is a ripple delete. Click empty space between two clips to select the gap and press <kbd>Delete</kbd> to close it, or use <b>Timeline › Close Gap at Playhead</b>.</td></tr>
+<tr><td>Nudge</td><td><kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd> in the timeline (with <kbd>Shift</kbd>: 10 frames), or <kbd>Alt</kbd>+<kbd>,</kbd> / <kbd>.</kbd> anywhere.</td></tr>
+<tr><td>Copy and paste</td><td><kbd>Ctrl</kbd>+<kbd>C</kbd>, then <kbd>Ctrl</kbd>+<kbd>V</kbd> pastes at the playhead on the same tracks.</td></tr>
+<tr><td>Turn a clip off</td><td><kbd>D</kbd> in the timeline: it stays in place but is not shown or heard.</td></tr>
+<tr><td>Exact numbers</td><td>Right-click › <i>Clip Properties…</i>: start frame, In / Out, track, opacity, zoom, position and composite mode (video) or gain and fades (sound). Also <i>Trim Start / End to Playhead</i>, <i>Reset Trim</i>, <i>Clip Color</i>, <i>Link / Unlink</i>, <i>Duplicate After</i>.</td></tr>
+</table>
+<h3>Compositing</h3>
+<p>Right-click a video clip for <b>Opacity</b>, <b>Composite Mode</b> (Normal, Add, Screen, Multiply, <b>Difference</b>) and <b>Picture in Picture</b> presets. Difference turns pixels that match black: put your animation over the reference on V2 to see exactly where poses and timing differ. The canvas follows the first clip, or set a fixed size in <b>Timeline › Timeline Settings…</b>; clips of other sizes are fitted into it.</p>
+<h3>Sound</h3>
+<p>A video file's sound comes in as its own clip on the audio track of the same number, linked to the picture. Each sound clip shows its waveform (scaled by its gain). Drag the yellow <b>gain line</b> up or down (<kbd>Shift</kbd> for fine steps), drag the small squares at the top corners to set <b>fades</b>, or right-click for <i>Clip Gain</i>, <i>Mute Clip</i> and <i>Fades</i>. What you hear — and what is exported — is the mix of every audible sound clip.</p>
+<h3>Annotation clips</h3>
+<p>Drawings are shown as clips on the annotation lanes: <b>T</b> for text, a <b>pencil</b> (or pen / highlighter) for drawings, and shape icons for rectangles, ellipses, lines and arrows. Strokes drawn together at one key form one clip. Drag a clip to change when it appears or move it to another lane (higher lanes draw on top), drag its edges to change how long it stays, cut it with the blade or <i>Cut at Playhead</i>, <kbd>Alt</kbd>+drag to duplicate, <kbd>Delete</kbd> to remove. Right-click for <i>Clip Color</i>, <i>Recolour drawing</i>, <i>End at Playhead</i>, <i>Hold to End of Clip</i>, <i>Set Duration…</i>, <i>Move to Lane</i> and <i>Lock</i>. Clicking a clip selects its objects in the viewer. The red review marks on the scrub bar and the clip bar work as before.</p>
+<h3>Navigation</h3>
+<table class="keys">
+<tr><th>Key</th><th>Action</th></tr>
+<tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>Previous / next edit point (any visible track).</td></tr>
+<tr><td><kbd>X</kbd> · <kbd>Alt</kbd>+<kbd>I</kbd> · <kbd>Alt</kbd>+<kbd>O</kbd></td><td>Mark the clip under the playhead as In / Out · go to In · go to Out.</td></tr>
+<tr><td><kbd>J</kbd> · <kbd>K</kbd> · <kbd>L</kbd></td><td>Shuttle backwards (press again: 2×, 4×, 8×) · stop · forwards / faster (in the timeline; <kbd>J</kbd> works everywhere, <kbd>Space</kbd> also stops).</td></tr>
+<tr><td><kbd>+</kbd> / <kbd>−</kbd> · <kbd>Shift</kbd>+<kbd>Z</kbd></td><td>Zoom around the playhead · fit the whole timeline. <kbd>Ctrl</kbd>+wheel zooms at the pointer, <kbd>Shift</kbd>+wheel scrolls the tracks, middle-drag pans.</td></tr>
+</table>
+<p>Every edit is one undo step (<kbd>Ctrl</kbd>+<kbd>Z</kbd>). Track switches (eye, lock, mute, solo) are saved with the project but are not undo steps.</p>
+<div class="callout"><b>Projects from 1.0</b> open unchanged: their clips are placed back to back on V1 and each clip's sound becomes a linked clip on A1. 1.1 saves <code>.frvm</code> version 7; CHARONOS 1.0 can still open it (it plays the video clips back to back and ignores tracks, gaps and sound clips).</div>
+</section>
+
+<section id="annotate">
+<h2><span class="n">6</span>Drawing and annotations</h2>
+<div class="grid2">
+<div class="card"><h4>Tools</h4><table>
+<tr><td>Select / transform</td><td><kbd>V</kbd></td></tr>
+<tr><td>Pencil · Pen · Highlighter</td><td><kbd>P</kbd> <kbd>N</kbd> <kbd>B</kbd></td></tr>
+<tr><td>Eraser</td><td><kbd>E</kbd></td></tr>
+<tr><td>Text</td><td><kbd>T</kbd></td></tr>
+<tr><td>Arrow · Line</td><td><kbd>A</kbd> <kbd>L</kbd></td></tr>
+<tr><td>Rectangle · Ellipse</td><td><kbd>R</kbd> <kbd>C</kbd></td></tr>
+<tr><td>Tracker</td><td><kbd>M</kbd></td></tr>
+</table></div>
+<div class="card"><h4>Modifiers</h4><table>
+<tr><td>Straight stroke</td><td><kbd>Shift</kbd>+drag</td></tr>
+<tr><td>Keep proportions, rotate in 15° steps</td><td><kbd>Shift</kbd>+handle</td></tr>
+<tr><td>Add to selection</td><td><kbd>Shift</kbd>+click</td></tr>
+<tr><td>New line in text</td><td><kbd>Shift</kbd>+<kbd>Enter</kbd></td></tr>
+<tr><td>Edit text again</td><td>double-click</td></tr>
+<tr><td>Copy / paste / delete</td><td><kbd>Ctrl</kbd>+<kbd>C</kbd> <kbd>Ctrl</kbd>+<kbd>V</kbd> <kbd>Del</kbd></td></tr>
+</table></div>
+</div>
+<h3>How drawings hold</h3>
+<p>Drawings are stored per source frame as <b>keys</b>, like cels. Drawing on a frame without its own key starts a new key there; the previous drawing stops at that frame. A key holds until the next key. Editing a held drawing copies it to the current frame first, so earlier frames stay as they were. Clearing a frame (<kbd>Shift</kbd>+<kbd>Del</kbd>) adds an empty key. Turn on <b>Edit › Continue Previous Drawing</b> to keep the previous drawing and add to it instead.</p>
+<p>Pens respond to tablet pressure (Wacom and Windows Ink); the mouse draws an even line. Width, opacity and text size are set in the stroke panel (the ≡ button), from 0.5 px up to 200 px. With a selection, colour and stroke changes apply to it.</p>
+<p>Right-click a drawing for copy, duplicate, colour, stroke, bring to front / send to back, lock and delete. Drawings can follow a tracked point: select them, <kbd>Shift</kbd>+click a tracking marker and press <kbd>Ctrl</kbd>+<kbd>J</kbd> (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>J</kbd> detaches).</p>
+</section>
+
+<section id="onion">
+<h2><span class="n">7</span>Onion skin</h2>
+<p>Toggle with <kbd>Shift</kbd>+<kbd>O</kbd> or the onion button; right-click the button (or <b>Video › Onion Skin Settings</b>) for the settings. CHARONOS ghosts both your drawings and the video itself, the way 2D animation packages and review players do:</p>
+<table>
+<tr><th>Setting</th><th>Meaning</th></tr>
+<tr><td>Mode: drawings by key</td><td>The previous / next <i>drawings</i>, however far away (like cel animation tools). Empty keys are skipped.</td></tr>
+<tr><td>Mode: drawings by frame distance</td><td>What is on screen N, 2N, 3N… frames away. A drawing that is already on screen is never ghosted over itself.</td></tr>
+<tr><td>Drawings before / after</td><td>How many ghosts in each direction (0–8).</td></tr>
+<tr><td>Video frames before / after</td><td>Ghost the neighbouring video frames (0–8 each way) — ideal for reading spacing in reference footage.</td></tr>
+<tr><td>Every N frames</td><td>Distance between ghosts. 2 shows every other frame (animation on twos).</td></tr>
+<tr><td>Opacity</td><td>Strength of the nearest ghost; farther ghosts fade out to about a quarter of it.</td></tr>
+<tr><td>Tint and colours</td><td>Before ghosts are warm (red), after ghosts cool (green) by default; pick your own colours or turn tinting off to see true colours.</td></tr>
+<tr><td>Show while playing</td><td>Ghosts are hidden during playback unless this is on.</td></tr>
+</table>
+<p>The nearest ghosts are drawn on top. Video ghosts are decoded on purpose when they are not cached yet, so they appear a moment after you stop on a frame. In A/B compare, each side gets its own ghosts.</p>
+</section>
+
+<section id="compare">
+<h2><span class="n">8</span>A/B compare</h2>
+<p>Show a second source next to the current one: click its <b>B</b> badge in the Project View or Sources list, or use the compare button. Layouts: <b>Wipe</b> <kbd>Shift</kbd>+<kbd>1</kbd> (drag the divider), <b>Side by Side</b> <kbd>Shift</kbd>+<kbd>2</kbd>, <b>Top / Bottom</b> <kbd>Shift</kbd>+<kbd>3</kbd>, <b>Blend</b> <kbd>Shift</kbd>+<kbd>4</kbd> (50 %), off with <kbd>Shift</kbd>+<kbd>0</kbd>; swap A and B with <kbd>Tab</kbd>.</p>
+<ul>
+  <li>B follows A <b>by time</b> at its own frame rate (a 30 fps take against a 24 fps reference stays in sync). Turn off <b>Video › Compare › Sync B by Time</b> to match frame numbers instead.</li>
+  <li>Playback runs as long as the longer of the two; A holds its last frame if it is shorter.</li>
+  <li>Click on B (or press <kbd>Shift</kbd>+<kbd>Tab</kbd> in Blend) to draw, select, track and onion-skin on B. The side being edited has a thin orange outline.</li>
+  <li><b>Audio › Compare Audio</b> chooses whose sound plays (Auto = A if it has sound, otherwise B).</li>
+</ul>
+</section>
+
+<section id="tracking">
+<h2><span class="n">9</span>Motion tracking</h2>
+<ol class="steps">
+  <li>Choose the tracker <kbd>M</kbd> and click a high-contrast point (a joint, a prop corner).</li>
+  <li>Press <kbd>Ctrl</kbd>+<kbd>T</kbd> to track forward or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> backward. <kbd>Esc</kbd> stops.</li>
+  <li>If the tracker drifts, drag the marker to the right spot: that frame becomes a hand key and later tracking never crosses it. Track again from there.</li>
+</ol>
+<p>The path is drawn like a Maya motion trail, with a dot per frame and squares on hand keys. <kbd>Shift</kbd>+<kbd>M</kbd> switches between the recent path (1–10 s, fading) and the full path; <b>Tracking › Frame Numbers</b> labels the dots. <b>Window › Tracking Manager</b> lists the clip's tracks with per-track visibility and the option to hide a track before the frame it was created on. Right-click a marker to track, clear frames before / after, rename, recolour or delete.</p>
+</section>
+
+<section id="graph">
+<h2><span class="n">10</span>Motion Graph and key poses</h2>
+<p><b>Window › Motion Graph</b> <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>5</kbd> turns a tracked point into timing data:</p>
+<ul>
+  <li><b>X</b> and <b>Y</b> position curves (screen up is up) and <b>Speed</b> — the distance moved per frame — as a filled curve. Click or drag on the graph to move the playhead.</li>
+  <li>A <b>spacing chart</b> underneath: one tick per frame, placed by distance travelled, exactly like the spacing guides animators draw. Bunched ticks are eases; wide gaps are fast moves.</li>
+  <li><b>Suggested key poses</b> (dashed amber lines): frames where the point stops or reverses direction on either axis — contacts, extremes, the top of an arc. Holds give one key where the motion stops.</li>
+  <li><b>Bookmark Keys</b> puts a bookmark on every suggestion, so <kbd>Ctrl</kbd>+<kbd>Space</kbd> immediately plays the action pose to pose. <b>Copy CSV</b> copies frame, x, y and speed for a spreadsheet.</li>
+</ul>
+<p>The readout shows the position, speed in px/frame and px/second, and the change in speed (acceleration) at the playhead.</p>
+</section>
+
+<section id="notes">
+<h2><span class="n">11</span>Frame notes</h2>
+<p><b>Window › Frame Notes</b> <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>4</kbd> keeps written review comments on exact frames — timing, spacing, acting, pose notes. Type in the box and press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> or <i>Save Note</i>; moving to another frame also saves what you typed. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd> jumps straight into the box. <kbd>Esc</kbd> discards the typing.</p>
+<p>The list below shows every note in the project; double-click one to go there. Notes are saved in the project, are undoable, appear as amber dots on timeline clips, and can be exported with <i>Export…</i> as CSV (opens in Excel), Markdown or plain text — handy for sending feedback.</p>
+</section>
+
+<section id="viewing">
+<h2><span class="n">12</span>Viewing aids</h2>
+<table class="keys">
+<tr><th>Aid</th><th>How</th></tr>
+<tr><td>Mirror (flip horizontal)</td><td><kbd>Shift</kbd>+<kbd>F</kbd> — check silhouettes and drawing balance. A <i>MIRRORED</i> tag is shown; exports are never flipped.</td></tr>
+<tr><td>Frame counter overlay</td><td><kbd>Shift</kbd>+<kbd>H</kbd> — frame, timecode, clip frame, fps and the stepping mode in the corner of the viewer.</td></tr>
+<tr><td>Grid</td><td><kbd>G</kbd> — a 12×12 grid with rule-of-thirds lines.</td></tr>
+<tr><td>Show / hide drawings</td><td><kbd>H</kbd></td></tr>
+<tr><td>Colour channels</td><td><b>Video › Color Channels</b>: RGB, red, green or blue only.</td></tr>
+<tr><td>Zoom and pan</td><td>Wheel to zoom, middle-drag to pan, <kbd>F</kbd> to fit, <kbd>Ctrl</kbd>+<kbd>1</kbd> for 100 %. Above 150 % pixels are shown sharp (no smoothing) for pixel peeping.</td></tr>
+<tr><td>Viewer only / full screen</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> hides the side panels and docks; <kbd>F11</kbd> goes full screen.</td></tr>
+</table>
+</section>
+
+<section id="filters">
+<h2><span class="n">13</span>Analysis filters (Filter menu)</h2>
+<p>Filters change how pictures are shown — never the media — to make motion easier to read. They apply to every video track, the A/B compare and video onion skin; drawings and tracks stay in colour on top. Press a filter's key again (or <kbd>Alt</kbd>+<kbd>0</kbd>) to go back to the picture.</p>
+<table class="keys">
+<tr><th>Filter</th><th>Key</th><th>Use it for</th></tr>
+<tr><td><b>Silhouette</b></td><td><kbd>Alt</kbd>+<kbd>S</kbd></td><td>The subject as one solid shape, split by brightness (automatic threshold per clip). Reads poses, lines of action and negative space without detail.</td></tr>
+<tr><td><b>Moving Silhouette</b></td><td><kbd>Alt</kbd>+<kbd>M</kbd></td><td>Whatever differs from the shot's still background. CHARONOS builds a background plate from the median of frames across the clip, so busy backgrounds disappear. Best with a fixed camera.</td></tr>
+<tr><td><b>Edge Lines</b></td><td><kbd>Alt</kbd>+<kbd>E</kbd></td><td>Contours only, like a line drawing — shapes, overlaps and arcs.</td></tr>
+<tr><td><b>Value</b></td><td><kbd>Alt</kbd>+<kbd>G</kbd></td><td>Brightness only, for value and contrast checks.</td></tr>
+<tr><td><b>Notan</b></td><td><kbd>Alt</kbd>+<kbd>N</kbd></td><td>Two or three flat values: the big shapes of the frame.</td></tr>
+<tr><td><b>Motion Highlight</b></td><td><kbd>Alt</kbd>+<kbd>H</kbd></td><td>What changed since the previous frame, in colour over a dimmed picture — spacing, arcs and holds at a glance while you step.</td></tr>
+</table>
+<p><b>Filter › Filter Settings…</b> <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>F</kbd> changes the filter live: threshold (or automatic), edge softness, how much of the picture shows behind the shape, a bright subject on a dark background, two or three notan values, and the shape, paper and motion colours. <i>Rebuild Background Plate</i> recomputes the plate of the clip under the playhead.</p>
+<div class="callout"><b>Exporting a filter.</b> When a filter is on, the Export dialog offers <i>Viewer Filter</i> to burn it into the movie or image sequence — the same maths as the viewer.</div>
+</section>
+
+<section id="window">
+<h2><span class="n">14</span>Window menu and layout</h2>
+<p>Closed a panel by accident? Everything comes back from the <b>Window</b> menu, which also shows which panels are open:</p>
+<table class="keys">
+<tr><th>Panel</th><th>Shortcut</th></tr>
+<tr><td>Project View</td><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>1</kbd></td></tr>
+<tr><td>Sources / Properties</td><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>2</kbd></td></tr>
+<tr><td>Timeline</td><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>3</kbd></td></tr>
+<tr><td>Frame Notes</td><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>4</kbd></td></tr>
+<tr><td>Motion Graph</td><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>5</kbd></td></tr>
+<tr><td>Tracking Manager</td><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>6</kbd></td></tr>
+<tr><td>Console</td><td><kbd>Ctrl</kbd>+<kbd>`</kbd></td></tr>
+<tr><td>Annotation toolbar, clip bar, scrub bar, transport bar</td><td>Window menu</td></tr>
+</table>
+<p>Docks can be dragged to any edge, stacked as tabs or floated on a second monitor. The layout is remembered between sessions; a floating panel whose monitor is gone comes back docked. <b>Show All Panels</b> reopens the standard panels and <b>Reset Layout</b> returns to the default arrangement (all docks hidden, Timeline included).</p>
+</section>
+
+<section id="export">
+<h2><span class="n">15</span>Exporting</h2>
+<h3>Video and image sequences</h3>
+<p><b>File › Export…</b> <kbd>Ctrl</kbd>+<kbd>E</kbd> renders the whole timeline, the current clip or the In/Out range:</p>
+<ul>
+  <li>MP4 H.264 (CPU, libx264) or H.264 / H.265 on the NVIDIA encoder (NVENC); MOV ProRes 422 HQ; PNG, JPEG or TIFF sequences.</li>
+  <li>Output frame rate and size, drawings burned in, tracks and trails, a caption with clip name and frame numbers, and a border so drawings outside the picture stay visible.</li>
+  <li>Audio is included (AAC in MP4, PCM in MOV) and follows the output frame rate.</li>
+  <li>With <i>A / B compare layout</i> on, the export reproduces the compare view, including B's drawings and sound.</li>
+  <li>Save your favourite settings as presets.</li>
+</ul>
+<h3>Still frames</h3>
+<p><b>File › Export Frame…</b> <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> saves the current frame as PNG, JPEG or TIFF with scale, padding, background (black, white or transparent), and optional video, drawings, tracks and caption. The area grows automatically to include drawings outside the picture.</p>
+</section>
+
+<section id="performance">
+<h2><span class="n">16</span>Performance, GPU and NVDEC</h2>
+<ul>
+  <li><b>GPU colour conversion.</b> Decoded video stays in its native Y′CbCr form in memory (4:2:0 = 1.5 bytes per pixel instead of 4 for RGB) and is converted to RGB by the graphics card while it is displayed. The same cache therefore holds about 2.6× more frames (62.5 % less memory per 4:2:0 frame, 50 % for 4:2:2 ProRes). Colour matrix (BT.601 / 709 / 2020) and video / full range are taken from the file.</li>
+  <li><b>NVDEC hardware decoding.</b> On NVIDIA GPUs, H.264, HEVC, VP9 and AV1 (AV1 needs an RTX 30-series or newer) decode on the GPU's video engine, freeing the CPU for playback, tracking and the UI. Frames go from the decoder straight into the cache in one copy. Formats NVDEC cannot handle (ProRes, 4:2:2 H.264, very large frames) and other GPUs decode on the CPU automatically, and a file that fails on the GPU mid-way switches to the CPU without losing your place. Toggle with <b>Tools › Hardware Decoding (NVDEC)</b>; Properties shows which decoder each clip uses.</li>
+  <li><b>Cache memory.</b> <b>Tools › Cache Memory…</b> sets the RAM for decoded frames (default: half of your RAM). The grey band on the scrub bar shows what is cached. CHARONOS reads ahead within the cache budget and keeps room for A, B and the next clip.</li>
+</ul>
+<div class="callout tip"><b>Tip.</b> For heavy UHD material, keep NVDEC on and give the cache 8–16 GB. Use <b>Tools › Clear Cache</b> after replacing a file on disk.</div>
+</section>
+
+<section id="ai">
+<h2><span class="n">17</span>AI assistants (MCP)</h2>
+<p>CHARONOS has a built-in <a href="https://modelcontextprotocol.io">Model Context Protocol</a> server (26 tools), so an AI assistant such as Claude can look at your frames and work with you: read the project, look at frames, write review notes, draw arrows, bookmark key poses, track a point and read its timing.</p>
+<h3>Connect Claude Code</h3>
+<p>Choose <b>Tools › AI Assistant (MCP) › Copy Claude Code Setup Command</b> and paste it into a terminal once. It looks like this:</p>
+<pre><code>claude mcp add charonos --scope user -- "C:\Users\you\AppData\Local\Programs\CHARONOS\charonos-mcp.exe"</code></pre>
+<h3>Connect Claude Desktop or another MCP client</h3>
+<p>Choose <b>Copy MCP Config (JSON)</b> and add it to the client's MCP settings (for Claude Desktop: <i>Settings › Developer › Edit Config</i>):</p>
+<pre><code>{
+  "mcpServers": {
+    "charonos": { "command": "C:/Users/you/AppData/Local/Programs/CHARONOS/charonos-mcp.exe", "args": [] }
+  }
+}</code></pre>
+<p>The client starts <code>charonos-mcp.exe</code>, a small bridge that talks to the running CHARONOS and starts it if needed.</p>
+<h3>What the assistant can do</h3>
+<table>
+<tr><th>Tool</th><th>Purpose</th></tr>
+<tr><td><code>get_state</code>, <code>list_sources</code></td><td>Project, current frame / clip / time, compare, onion skin, view settings; every source with keys, bookmarks, notes and tracks.</td></tr>
+<tr><td><code>get_frame_image</code></td><td>Look at a frame: a PNG of the picture with drawings and tracks.</td></tr>
+<tr><td><code>go_to_frame</code>, <code>step</code>, <code>playback</code>, <code>set_in_out</code></td><td>Navigate and play.</td></tr>
+<tr><td><code>add_annotation</code>, <code>clear_frame</code>, <code>list_annotations</code></td><td>Draw text, arrows, lines, rectangles and ellipses (coordinates 0–1).</td></tr>
+<tr><td><code>notes</code>, <code>bookmark</code></td><td>Write and read frame notes; add, remove and list bookmarks.</td></tr>
+<tr><td><code>track_point</code>, <code>list_tracks</code>, <code>motion_analysis</code></td><td>Track a point and read speed, path length and suggested key poses.</td></tr>
+<tr><td><code>timeline</code></td><td>The multi-track timeline: list clips and tracks; add, place (frame and track), remove, split, trim and reorder clips; set opacity, zoom, position, composite mode, gain or mute; close gaps; add tracks. Ripple or not, per call.</td></tr>
+<tr><td><code>annotation_clips</code></td><td>List a source's annotation clips; move, trim, split, delete, duplicate or recolour one.</td></tr>
+<tr><td><code>set_filter</code></td><td>Silhouette, moving silhouette, edges, value, notan or motion highlight, with threshold and options.</td></tr>
+<tr><td><code>set_compare</code>, <code>set_view</code>, <code>set_onion</code></td><td>Compare layout, mirror, grid, overlay, channels, onion skin.</td></tr>
+<tr><td><code>open_media</code>, <code>open_project</code>, <code>save_project</code>, <code>export_frame</code>, <code>console</code></td><td>Files and console commands.</td></tr>
+</table>
+<h3>Example requests</h3>
+<ul>
+  <li>“Look at frames 0–40 of the walk reference and write a note on each contact and passing position.”</li>
+  <li>“Track the ball, then bookmark its key poses and tell me where the spacing is uneven.”</li>
+  <li>“Compare my animation (B) with the reference (A) side by side and list the frames where the timing differs.”</li>
+</ul>
+<div class="callout"><b>Privacy and control.</b> The connection is a local named pipe that only your Windows user account can open; CHARONOS itself sends nothing over the network. Frames and notes the assistant reads are passed to the AI service by your AI client, as with anything you share with it. Whatever the assistant does goes through the normal commands, so it appears on screen and can be undone with <kbd>Ctrl</kbd>+<kbd>Z</kbd>. If the assistant tries to open another project while yours has unsaved changes, CHARONOS asks you first. Turn the connection off with <b>Tools › AI Assistant (MCP) › Allow AI Assistants to Connect</b>.</div>
+</section>
+
+<section id="workflows">
+<h2><span class="n">18</span>Animator workflows</h2>
+<h3>Break down a reference</h3>
+<ol class="steps">
+  <li>Import the reference and set an In/Out range around the action (<kbd>I</kbd>, <kbd>O</kbd>, <kbd>Ctrl</kbd>+<kbd>L</kbd>).</li>
+  <li>Track the key body part (hips for a walk, the wrist for a throw) with <kbd>M</kbd> and <kbd>Ctrl</kbd>+<kbd>T</kbd>.</li>
+  <li>Open the Motion Graph, read the spacing chart and press <b>Bookmark Keys</b>.</li>
+  <li>Play the poses with <kbd>Ctrl</kbd>+<kbd>Space</kbd>, adjust bookmarks with <kbd>K</kbd>, and write frame notes for contacts, extremes and breakdowns.</li>
+  <li>Check the action on twos with <kbd>Alt</kbd>+<kbd>2</kbd>, and with video onion skin (2 before / 2 after, every 2 frames).</li>
+</ol>
+<h3>Review your animation against reference</h3>
+<ol class="steps">
+  <li>Import both; set the reference as A and your playblast as B (<b>B</b> badge), Side by Side <kbd>Shift</kbd>+<kbd>2</kbd>.</li>
+  <li>Keep <i>Sync B by Time</i> on if the frame rates differ.</li>
+  <li>Draw corrections on B and leave notes; export the compare layout as MP4 to share.</li>
+</ol>
+<h3>Assemble a selects reel</h3>
+<p>Open the Timeline panel, drag the best takes in, trim each to the useful action, split long takes with <kbd>Ctrl</kbd>+<kbd>B</kbd> and remove the rest. Export the timeline, or loop a section for study.</p>
+</section>
+
+<section id="shortcuts">
+<h2><span class="n">19</span>Keyboard shortcuts</h2>
+<p>These are the default keys. Change any of them in <b>Tools › HotKey Manager</b> <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>K</kbd>; <kbd>F1</kbd> shows your current set.</p>
+<div class="grid2">
+<div class="card"><h4>Timeline</h4><table>
+<tr><td>Selection / blade tool (timeline focused)</td><td><kbd>V</kbd> <kbd>A</kbd> · <kbd>B</kbd> <kbd>C</kbd></td></tr>
+<tr><td>Ripple editing · linked selection</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd></td></tr>
+<tr><td>Snapping (timeline focused)</td><td><kbd>S</kbd></td></tr>
+<tr><td>Delete · ripple delete (timeline focused)</td><td><kbd>Del</kbd> · <kbd>Shift</kbd>+<kbd>Del</kbd></td></tr>
+<tr><td>Nudge clips</td><td><kbd>Alt</kbd>+<kbd>,</kbd> / <kbd>.</kbd> (<kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd> in the timeline)</td></tr>
+<tr><td>Previous / next edit</td><td><kbd>↑</kbd> · <kbd>↓</kbd></td></tr>
+<tr><td>Mark clip · go to In / Out</td><td><kbd>X</kbd> · <kbd>Alt</kbd>+<kbd>I</kbd> / <kbd>Alt</kbd>+<kbd>O</kbd></td></tr>
+<tr><td>Play reverse · shuttle (timeline)</td><td><kbd>J</kbd> · <kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd></td></tr>
+<tr><td>Disable clip · fit (timeline focused)</td><td><kbd>D</kbd> · <kbd>Shift</kbd>+<kbd>Z</kbd></td></tr>
+</table></div>
+<div class="card"><h4>Filter</h4><table>
+<tr><td>No filter</td><td><kbd>Alt</kbd>+<kbd>0</kbd></td></tr>
+<tr><td>Silhouette · moving silhouette</td><td><kbd>Alt</kbd>+<kbd>S</kbd> · <kbd>Alt</kbd>+<kbd>M</kbd></td></tr>
+<tr><td>Edge lines · value · notan</td><td><kbd>Alt</kbd>+<kbd>E</kbd> · <kbd>Alt</kbd>+<kbd>G</kbd> · <kbd>Alt</kbd>+<kbd>N</kbd></td></tr>
+<tr><td>Motion highlight</td><td><kbd>Alt</kbd>+<kbd>H</kbd></td></tr>
+<tr><td>Filter settings</td><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>F</kbd></td></tr>
+</table></div>
+<div class="card"><h4>File</h4><table>
+<tr><td>New project</td><td><kbd>Ctrl</kbd>+<kbd>N</kbd></td></tr>
+<tr><td>New 2D animation</td><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd></td></tr>
+<tr><td>Open project</td><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td></tr>
+<tr><td>Import media / folder</td><td><kbd>Ctrl</kbd>+<kbd>I</kbd> · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd></td></tr>
+<tr><td>Save / Save as</td><td><kbd>Ctrl</kbd>+<kbd>S</kbd> · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></td></tr>
+<tr><td>Export / export frame</td><td><kbd>Ctrl</kbd>+<kbd>E</kbd> · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd></td></tr>
+</table></div>
+<div class="card"><h4>Edit</h4><table>
+<tr><td>Undo / redo</td><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> (<kbd>Ctrl</kbd>+<kbd>Y</kbd>)</td></tr>
+<tr><td>Select all / copy / paste</td><td><kbd>Ctrl</kbd>+<kbd>A</kbd> · <kbd>Ctrl</kbd>+<kbd>C</kbd> · <kbd>Ctrl</kbd>+<kbd>V</kbd></td></tr>
+<tr><td>Delete</td><td><kbd>Del</kbd> / <kbd>Backspace</kbd></td></tr>
+<tr><td>Clear frame</td><td><kbd>Shift</kbd>+<kbd>Del</kbd></td></tr>
+<tr><td>Join to / detach from track</td><td><kbd>Ctrl</kbd>+<kbd>J</kbd> · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>J</kbd></td></tr>
+<tr><td>Split clips at playhead</td><td><kbd>Ctrl</kbd>+<kbd>B</kbd></td></tr>
+<tr><td>Frame note</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd></td></tr>
+<tr><td>Stop tracking / deselect</td><td><kbd>Esc</kbd></td></tr>
+</table></div>
+<div class="card"><h4>Tools</h4><table>
+<tr><td>Select</td><td><kbd>V</kbd></td></tr>
+<tr><td>Pencil / pen / highlighter</td><td><kbd>P</kbd> · <kbd>N</kbd> · <kbd>B</kbd></td></tr>
+<tr><td>Eraser / text</td><td><kbd>E</kbd> · <kbd>T</kbd></td></tr>
+<tr><td>Arrow / line</td><td><kbd>A</kbd> · <kbd>L</kbd></td></tr>
+<tr><td>Rectangle / ellipse</td><td><kbd>R</kbd> · <kbd>C</kbd></td></tr>
+<tr><td>Tracker</td><td><kbd>M</kbd></td></tr>
+</table></div>
+<div class="card"><h4>Playback</h4><table>
+<tr><td>Play / pause</td><td><kbd>Space</kbd></td></tr>
+<tr><td>Stepped (bookmarks)</td><td><kbd>Ctrl</kbd>+<kbd>Space</kbd></td></tr>
+<tr><td>Play on 2s / 3s / 4s</td><td><kbd>Alt</kbd>+<kbd>2</kbd> · <kbd>3</kbd> · <kbd>4</kbd></td></tr>
+<tr><td>Step / 10 frames</td><td><kbd>←</kbd> <kbd>→</kbd> · <kbd>Shift</kbd>+<kbd>←</kbd> <kbd>→</kbd></td></tr>
+<tr><td>First / last frame</td><td><kbd>Home</kbd> · <kbd>End</kbd></td></tr>
+<tr><td>Previous / next clip</td><td><kbd>↑</kbd> · <kbd>↓</kbd></td></tr>
+<tr><td>In / Out / clear</td><td><kbd>I</kbd> · <kbd>O</kbd> · <kbd>Alt</kbd>+<kbd>X</kbd></td></tr>
+<tr><td>Loop In/Out</td><td><kbd>Ctrl</kbd>+<kbd>L</kbd></td></tr>
+</table></div>
+<div class="card"><h4>Bookmarks and keys</h4><table>
+<tr><td>Toggle bookmark</td><td><kbd>K</kbd></td></tr>
+<tr><td>Previous / next bookmark</td><td><kbd>Ctrl</kbd>+<kbd>←</kbd> · <kbd>Ctrl</kbd>+<kbd>→</kbd></td></tr>
+<tr><td>Previous / next drawing</td><td><kbd>,</kbd> · <kbd>.</kbd></td></tr>
+<tr><td>Previous / next edit key</td><td><kbd>Shift</kbd>+<kbd>,</kbd> · <kbd>Shift</kbd>+<kbd>.</kbd></td></tr>
+</table></div>
+<div class="card"><h4>Video</h4><table>
+<tr><td>Fit / 100 %</td><td><kbd>F</kbd> · <kbd>Ctrl</kbd>+<kbd>1</kbd></td></tr>
+<tr><td>Grid / drawings</td><td><kbd>G</kbd> · <kbd>H</kbd></td></tr>
+<tr><td>Onion skin</td><td><kbd>Shift</kbd>+<kbd>O</kbd></td></tr>
+<tr><td>Mirror / frame counter</td><td><kbd>Shift</kbd>+<kbd>F</kbd> · <kbd>Shift</kbd>+<kbd>H</kbd></td></tr>
+<tr><td>Compare off / wipe / side / stack / blend</td><td><kbd>Shift</kbd>+<kbd>0</kbd>–<kbd>4</kbd></td></tr>
+<tr><td>Swap A/B / annotate B</td><td><kbd>Tab</kbd> · <kbd>Shift</kbd>+<kbd>Tab</kbd></td></tr>
+</table></div>
+<div class="card"><h4>Tracking and audio</h4><table>
+<tr><td>Track forward / backward</td><td><kbd>Ctrl</kbd>+<kbd>T</kbd> · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd></td></tr>
+<tr><td>Trail: recent / full path</td><td><kbd>Shift</kbd>+<kbd>M</kbd></td></tr>
+<tr><td>Mute</td><td><kbd>Ctrl</kbd>+<kbd>M</kbd></td></tr>
+<tr><td>Volume</td><td><kbd>Ctrl</kbd>+<kbd>↑</kbd> · <kbd>Ctrl</kbd>+<kbd>↓</kbd></td></tr>
+</table></div>
+<div class="card"><h4>Window and help</h4><table>
+<tr><td>Panels</td><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>6</kbd></td></tr>
+<tr><td>Viewer only / full screen</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> · <kbd>F11</kbd></td></tr>
+<tr><td>Console</td><td><kbd>Ctrl</kbd>+<kbd>`</kbd></td></tr>
+<tr><td>HotKey Manager</td><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>K</kbd></td></tr>
+<tr><td>Shortcuts</td><td><kbd>F1</kbd></td></tr>
+</table></div>
+<div class="card"><h4>Mouse and pen</h4><table>
+<tr><td>Scrub (fine)</td><td><kbd>Alt</kbd>+drag (<kbd>Shift</kbd>)</td></tr>
+<tr><td>Pan / zoom</td><td>middle-drag · wheel</td></tr>
+<tr><td>Straight stroke</td><td><kbd>Shift</kbd>+drag</td></tr>
+<tr><td>Context menus</td><td>right-click</td></tr>
+</table></div>
+<div class="card"><h4>Timeline panel</h4><table>
+<tr><td>Move / trim a clip</td><td>drag body · drag edge</td></tr>
+<tr><td>Remove selected clip</td><td><kbd>Del</kbd></td></tr>
+<tr><td>Zoom around pointer</td><td><kbd>Ctrl</kbd>+wheel</td></tr>
+<tr><td>Zoom in / out</td><td><kbd>+</kbd> · <kbd>−</kbd></td></tr>
+<tr><td>Go to clip</td><td>double-click</td></tr>
+</table></div>
+</div>
+</section>
+
+<section id="troubleshooting">
+<h2><span class="n">20</span>Troubleshooting</h2>
+<table>
+<tr><th>Problem</th><th>What to do</th></tr>
+<tr><td>A panel disappeared</td><td>Window menu, or Window › Reset Layout.</td></tr>
+<tr><td>Playback stutters on UHD</td><td>Keep Tools › Hardware Decoding on, raise Tools › Cache Memory, let the grey cache band fill, or turn on Playback › Skip Frames to Keep Up.</td></tr>
+<tr><td>Colours look wrong on one file</td><td>Check Properties › Pixel Format. Untagged HD video is treated as BT.709 and SD as BT.601, like most players. Try turning hardware decoding off to compare.</td></tr>
+<tr><td>A file won't open</td><td>Open the Console (<kbd>Ctrl</kbd>+<kbd>`</kbd>) for the FFmpeg message. Re-wrap or re-encode unusual files with FFmpeg.</td></tr>
+<tr><td>Sound is late or early</td><td>Audio › Audio Offset… (positive values delay the picture).</td></tr>
+<tr><td>Media offline after moving a project</td><td>Keep media next to the project, or locate the files when asked on open.</td></tr>
+<tr><td>The AI assistant can't connect</td><td>Check Tools › AI Assistant (MCP) › Allow AI Assistants to Connect, make sure the path in the client config points to <code>charonos-mcp.exe</code> in the install folder, and restart the AI client. Only one CHARONOS window serves MCP at a time.</td></tr>
+<tr><td>The Timeline panel is empty</td><td>Sources must be on the timeline: drag them from the Project View, or right-click a source › Add to Timeline.</td></tr>
+</table>
+</section>
+
+<section id="whatsnew">
+<h2><span class="n">21</span>What's new in 1.1</h2>
+<ul>
+  <li><b>Multi-track timeline</b>: video tracks composited bottom to top, audio tracks, gaps that stay, overwrite or ripple editing, blade tool, snapping, linked picture and sound, copy / paste, nudge, disable, clip colours and exact clip properties.</li>
+  <li><b>Annotation clips</b>: every drawing, text and shape appears as a clip on annotation lanes with its own icon — move, trim, cut, duplicate, recolour, lock; lanes can be hidden or locked. The red review marks stay.</li>
+  <li><b>Independent sound</b>: sound clips with waveforms, gain line, fades, mute; track mute, solo and gain; playback and export use the same mix.</li>
+  <li><b>Compositing</b>: opacity, Add / Screen / Multiply / Difference, picture-in-picture, fixed or automatic canvas.</li>
+  <li><b>Filter menu</b>: silhouette, moving silhouette (background plate), edge lines, value, notan and motion highlight, live settings and export.</li>
+  <li><b>Navigation</b>: edit points on every track, J / K / L shuttle with reverse play, mark clip, go to In / Out, a timecode readout in the timeline.</li>
+  <li><b>AI assistants</b>: the <code>timeline</code> tool now places clips on tracks and sets their compositing and sound; new <code>annotation_clips</code> and <code>set_filter</code> tools.</li>
+  <li><b>Fixes</b>: onion-skin ghosts of a clip stay under higher tracks; the regression checks grew to 65.</li>
+</ul>
+<h3>1.0</h3>
+<ul>
+  <li><b>GPU colour conversion</b>: frames are cached as Y′CbCr and converted on the GPU — about 60 % less cache memory, faster uploads.</li>
+  <li><b>NVDEC hardware decoding</b> with automatic CPU fallback, direct copy into the cache, and a per-clip decoder readout.</li>
+  <li><b>Timeline panel</b> (Window › Timeline, hidden by default): trimming, splitting, drag-and-drop reordering, snapping, thumbnails, waveforms and full undo.</li>
+  <li><b>Window menu</b>: every panel and bar can be brought back; viewer-only and full-screen modes; layouts persist and can be reset.</li>
+  <li><b>Onion skin</b> rebuilt to work like animation tools: key or frame-distance modes, separate before / after counts for drawings and video, step, falloff opacity, tint colours, optional display during playback.</li>
+  <li><b>Animator tools</b>: Motion Graph with spacing chart and key-pose suggestions, frame notes with export, play on 2s/3s/4s, playback speed presets, mirror view and frame counter overlay.</li>
+  <li><b>AI assistants</b>: built-in MCP server with 24 tools and the <code>charonos-mcp.exe</code> bridge.</li>
+  <li><b>Help</b>: a searchable shortcut sheet that reflects your own key bindings, and this guide.</li>
+  <li><b>Uniform icons</b>: every icon is normalised to the same size and stroke weight.</li>
+  <li><b>Stability</b>: fixed a crash when editing the frame rate in Properties, safer cache limits, decoder fallback on GPU errors, out-of-memory handling in the decoder threads, validation of project files, and more regression tests (51).</li>
+</ul>
+<footer>CHARONOS 1.1 · Built with Qt, FFmpeg (GPL) and OpenGL. © CHARONOS. This guide ships with the application and works offline.</footer>
+</section>
+</main>
+</div>
+<script>
+(function () {
+  // Theme switch (remembered in this browser only).
+  const root = document.documentElement;
+  const apply = (mode) => { if (mode === 'auto') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', mode); };
+  let saved = 'auto';
+  try { saved = localStorage.getItem('charonos-guide-theme') || 'auto'; } catch (e) {}
+  apply(saved);
+  document.querySelectorAll('.theme button').forEach((b) => b.addEventListener('click', () => {
+    apply(b.dataset.set);
+    try { localStorage.setItem('charonos-guide-theme', b.dataset.set); } catch (e) {}
+  }));
+  // Highlight the section in view.
+  const links = Array.from(document.querySelectorAll('#toc a'));
+  const sections = links.map((a) => document.querySelector(a.getAttribute('href')));
+  const onScroll = () => {
+    let current = 0;
+    sections.forEach((s, i) => { if (s && s.getBoundingClientRect().top < 140) current = i; });
+    links.forEach((a, i) => a.classList.toggle('active', i === current));
+  };
+  document.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+  // Search filters sections by their text.
+  const search = document.getElementById('search');
+  search.addEventListener('input', () => {
+    const q = search.value.trim().toLowerCase();
+    sections.forEach((s, i) => {
+      const hit = !q || (s && s.textContent.toLowerCase().includes(q));
+      if (s) s.classList.toggle('hidden-by-search', !hit);
+      links[i].parentElement.classList.toggle('hidden-by-search', !hit);
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,7 +1,9 @@
 #include "FrameServer.h"
 
 #include <QThread>
+#include <chrono>
 #include <algorithm>
+#include <utility>
 
 FrameServer::FrameServer(std::unique_ptr<FrameSource> source, std::shared_ptr<FrameCache> cache, int64_t keyBase,
                          QObject* parent)
@@ -11,7 +13,8 @@ FrameServer::FrameServer(std::unique_ptr<FrameSource> source, std::shared_ptr<Fr
     , m_keyBase(keyBase)
     , m_info(m_source->info())
 {
-    m_frameBytes = qint64(m_info.width) * m_info.height * 4;
+    // Until the first frame arrives assume RGBA; video then reports its planar size (1.5 B/px for 4:2:0).
+    m_frameBytes = std::max<qint64>(1, qint64(m_info.width) * m_info.height * 4);
     m_want = 0;
     m_rangeEnd = m_info.frameCount - 1;
     const int workers = m_source->supportsParallelDecode() ? std::clamp(QThread::idealThreadCount() / 2, 2, 8) : 1;
@@ -51,20 +54,55 @@ void FrameServer::setIdle()
     std::lock_guard lock(m_mutex);
     m_playing = false;
     m_fill = false;
+    m_extra.clear();
+}
+
+void FrameServer::requestExtra(QVector<int64_t> frames)
+{
+    {
+        std::lock_guard lock(m_mutex);
+        m_extra = std::move(frames);
+    }
+    m_cv.notify_all();
+}
+
+void FrameServer::requestPoster(int64_t frame)
+{
+    if (frame < 0 || frame >= m_info.frameCount || m_cache->contains(m_keyBase + frame)) return;
+    {
+        std::lock_guard lock(m_mutex);
+        m_poster = frame;
+    }
+    m_cv.notify_all();
 }
 
 bool FrameServer::pickLocked(int64_t& out)
 {
     const int64_t count = m_info.frameCount;
-    if (!m_fill || m_want < 0 || count <= 0) return false;
+    if (count <= 0) return false;
 
     auto usable = [&](int64_t i) {
         return i >= 0 && i < count && !m_inFlight.count(i) && !m_failed.count(i) && !m_cache->contains(m_keyBase + i);
     };
-    if (usable(m_want)) {
+    if (m_fill && m_want >= 0 && usable(m_want)) {
         out = m_want;
         return true;
     }
+    // Onion-skin ghosts and a timeline poster frame come right after the wanted frame, even while
+    // this source isn't the one being played (they are few and on screen).
+    for (int64_t f : m_extra)
+        if (usable(f)) {
+            out = f;
+            return true;
+        }
+    if (m_poster >= 0) {
+        const int64_t p = std::exchange(m_poster, -1);
+        if (usable(p)) {
+            out = p;
+            return true;
+        }
+    }
+    if (!m_fill || m_want < 0) return false;
 
     const int64_t lo = m_rangeStart;
     const int64_t hi = m_rangeEnd;
@@ -118,8 +156,18 @@ void FrameServer::workerLoop()
         int64_t index = -1;
         {
             std::unique_lock lock(m_mutex);
-            m_cv.wait(lock, [&] { return m_stop || pickLocked(index); });
+            // After a quiet spell the decoder gives its buffers back (a project keeps every source
+            // open; only the ones in use need a live codec). The next request reopens it.
+            if (!m_cv.wait_for(lock, std::chrono::seconds(kIdleReleaseSeconds), [&] { return m_stop || pickLocked(index); })) {
+                if (m_workers.size() == 1 && m_inFlight.empty() && !m_released) {
+                    m_released = true;
+                    lock.unlock();
+                    m_source->releaseIdleResources();
+                }
+                continue;
+            }
             if (m_stop) return;
+            m_released = false;
             m_inFlight.insert(index);
         }
 
@@ -133,15 +181,29 @@ void FrameServer::workerLoop()
             std::lock_guard lock(m_mutex);
             return !m_inFlight.count(i) && !m_stop;
         };
-        sink.deliver = [&](int64_t i, QImage&& img) {
-            m_cache->insert(m_keyBase + i, std::make_shared<const QImage>(std::move(img)));
+        sink.deliver = [&](int64_t i, VideoFrame&& f) {
+            if (f.isNull()) return;
+            m_frameBytes = std::max<qint64>(1, f.sizeInBytes());
+            m_cache->insert(m_keyBase + i, std::make_shared<const VideoFrame>(std::move(f)));
             emit frameReady(i);
         };
 
-        QImage image;
+        VideoFrame frame;
         QString error;
-        const bool ok = m_source->decode(index, image, &error, &sink);
-        if (ok) m_cache->insert(m_keyBase + index, std::make_shared<const QImage>(std::move(image)));
+        bool ok = false;
+        try {
+            ok = m_source->decodeFrame(index, frame, &error, &sink) && !frame.isNull();
+        } catch (const std::bad_alloc&) {
+            // A huge frame against a nearly full address space: report it instead of terminating.
+            error = QStringLiteral("Out of memory");
+            ok = false;
+        }
+        if (ok) {
+            m_frameBytes = std::max<qint64>(1, frame.sizeInBytes());
+            m_cache->insert(m_keyBase + index, std::make_shared<const VideoFrame>(std::move(frame)));
+        } else if (error.isEmpty()) {
+            error = QStringLiteral("Decode failed");
+        }
         {
             std::lock_guard lock(m_mutex);
             m_inFlight.erase(index);

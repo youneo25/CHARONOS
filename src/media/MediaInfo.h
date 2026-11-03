@@ -18,6 +18,8 @@ struct MediaInfo {
     QString pixelFormat;
     bool variableFrameRate = false;
     bool isImageSequence = false;
+    bool hasAudio = false;  // the file also has a sound stream (it becomes a linked sound clip)
+    QString decoderName;  // "NVDEC (CUDA)", "CPU · 16 threads", "Image reader"...
     // Presentation time (seconds, container clock) of each frame. Empty for image sequences.
     // Phone and screen recordings are usually VFR, so frame N is NOT at N / fps.
     std::vector<double> frameTimes;

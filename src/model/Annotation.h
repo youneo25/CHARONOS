@@ -38,6 +38,11 @@ struct Annotation {
     QString penStyle = QStringLiteral("pencil"); // pencil | pen | highlighter
     QString trackId;
     QPointF trackAnchor; // tracked position when joined; translation is relative to this anchor
+    // 1.1 annotation clips: objects drawn together share a clip; its lane is the annotation track
+    // (higher lanes draw on top). -1 = not placed yet (laid out automatically).
+    QString clipId;
+    int lane = -1;
+    QColor clipColor;  // label colour of the clip block (invalid = automatic)
 
     QJsonObject extra;  // unknown keys, preserved on save
 

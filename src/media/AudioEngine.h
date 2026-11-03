@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AudioClip.h"
+#include "AudioMix.h"
 #include "AudioClock.h"
 
 #include <atomic>
@@ -24,6 +25,12 @@ public:
     void play(std::shared_ptr<const AudioClip> clip, double videoSec, double speed);
     // A short burst (e.g. one frame while stepping).
     void snippet(std::shared_ptr<const AudioClip> clip, double videoSec, double seconds);
+    // The timeline's mix from `timelineSec`; position() then reports timeline seconds.
+    void playMix(std::shared_ptr<const AudioMix> mix, double timelineSec, double speed);
+    void snippetMix(std::shared_ptr<const AudioMix> mix, double timelineSec, double seconds);
+    // Swaps the mix being played (gain / mute edits) without moving the play position.
+    void updateMix(std::shared_ptr<const AudioMix> mix);
+    bool playingMix() const { return m_continuous && m_mix != nullptr; }
     void stop();
 
     bool isPlaying() const { return m_continuous; }
@@ -34,7 +41,8 @@ public:
     void setMuted(bool m) { m_muted = m; }
 
 private:
-    void start(std::shared_ptr<const AudioClip> clip, double videoSec, double speed, double seconds);
+    void start(std::shared_ptr<const AudioClip> clip, std::shared_ptr<const AudioMix> mix, double videoSec, double speed,
+               double seconds);
     void pump();
     void fill(std::vector<int16_t>& block);
 
@@ -49,7 +57,9 @@ private:
     std::atomic<bool> m_quit{ false };
 
     std::shared_ptr<const AudioClip> m_clip;
-    double m_read = 0.0;     // position in clip frames
+    std::shared_ptr<const AudioMix> m_mix;
+    std::vector<float> m_mixBuf;
+    double m_read = 0.0;     // position in clip frames, or timeline seconds for a mix
     double m_speed = 1.0;
     double m_end = -1.0;     // snippet end in clip frames, -1 = continuous
     double m_startVideoSec = 0.0;

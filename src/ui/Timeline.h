@@ -12,9 +12,10 @@ public:
     explicit Timeline(QWidget* parent = nullptr);
 
     void setFrameCount(qint64 count);
+    qint64 currentFrame() const { return m_current; }
     void setCurrent(qint64 frame);
     void setMarks(QVector<qint64> annotated, QVector<qint64> bookmarks);
-    void setStepped(bool on) { m_stepped = on; update(); }
+    void setStepped(bool on, const QString& label = QString()) { m_stepped = on; m_stepLabel = label; update(); }
     void setSegments(QVector<qint64> starts);
     void setLoop(bool enabled, qint64 in, qint64 out);
     void setCacheMask(QBitArray mask);
@@ -48,6 +49,7 @@ private:
     QVector<qint64> m_bookmarks;
     QVector<qint64> m_segments;
     bool m_stepped = false;
+    QString m_stepLabel;
     bool m_loop = false;
     qint64 m_in = 0;
     qint64 m_out = 0;
@@ -67,7 +69,9 @@ class ClipBar : public QWidget {
     Q_OBJECT
 public:
     explicit ClipBar(QWidget* parent = nullptr);
-    void setClip(const QString& name, qint64 count, qint64 local, qint64 offset = 0);
+    // local / count are positions inside the segment; offset = its first global frame and
+    // firstLabel = the source frame number shown at its start (a trimmed clip doesn't start at 0).
+    void setClip(const QString& name, qint64 count, qint64 local, qint64 offset = 0, qint64 firstLabel = 0);
     void setReviewMarks(QVector<qint64> keys, QVector<qint64> bookmarks);
 
     QSize sizeHint() const override { return { 800, 48 }; }
@@ -89,5 +93,6 @@ private:
     qint64 m_count = 0;
     qint64 m_local = 0;
     qint64 m_offset = 0;
+    qint64 m_firstLabel = 0;
     QVector<qint64> m_keys, m_bookmarks;
 };

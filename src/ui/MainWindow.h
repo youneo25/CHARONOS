@@ -1,12 +1,18 @@
 #pragma once
 
+#include "analysis/AnalysisFilter.h"
 #include "media/AudioEngine.h"
+#include "media/AudioMix.h"
 #include "media/MediaLibrary.h"
+#include "model/NoteClips.h"
 #include "model/Project.h"
 #include "model/Sequence.h"
+#include "model/TimelineModel.h"
 #include "ui/Viewport.h"
 
 #include <QElapsedTimer>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QMainWindow>
 #include <QMap>
 #include <QTimer>
@@ -25,6 +31,8 @@ class QLabel;
 class QListWidget;
 class QSlider;
 class QMenu;
+class QPlainTextEdit;
+class QSplitter;
 class QTabWidget;
 class QToolButton;
 class QTreeWidget;
@@ -33,6 +41,16 @@ class QThread;
 class ABDelegate;
 class StrokePanel;
 class Timeline;
+class TimelineEditor;
+class MotionGraph;
+class McpServer;
+class CompareBar;
+class UpdateChecker;
+struct TimelineClip;
+
+// Item data roles in the project tree / clip list. RoleId and RoleKind must stay Qt::UserRole
+// and Qt::UserRole + 1: the timeline editor reads them from tree drags.
+enum TreeRole { RoleId = Qt::UserRole, RoleKind, RoleFolder, RoleClip };
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -42,12 +60,18 @@ public:
 
     void openPaths(const QStringList& paths);
 
+    // AI tool calls from the built-in MCP server (Tools > AI Assistant (MCP)). Runs on the UI thread.
+    QJsonValue runTool(const QString& name, const QJsonObject& args, QString* error);
+
 protected:
     void closeEvent(QCloseEvent* e) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
+    void changeEvent(QEvent* e) override;
+    void resizeEvent(QResizeEvent* e) override;
 
 private:
     friend class FeatureRegression;
+    static constexpr int kLayoutVersion = 100;  // QMainWindow::saveState() version for 1.0 layouts
     // Where the playhead is: which clip and which of its frames.
     struct Loc {
         const Sequence::Segment* segment = nullptr;
@@ -60,6 +84,8 @@ private:
 
     // ---- UI construction
     void buildMenus();
+    // A menu command with a rebindable shortcut (listed in HotKey Manager and Help > Shortcuts).
+    QAction* addCommand(QMenu* menu, const QString& text, const QKeySequence& key, std::function<void()> slot);
     QWidget* buildProjectPanel();
     QWidget* buildTimelinePanel();
     QWidget* buildToolStrip();
@@ -76,7 +102,7 @@ private:
     void newCanvasDialog();
     void scrubRelative(int frames);
     void runConsoleCommand(const QString& command);
-    void importPaths(const QStringList& paths);
+    QStringList importPaths(const QStringList& paths, bool toTimeline = true);  // the new source ids
     bool addSource(MediaRef ref, double fps, bool toTimeline);
     bool openServerFor(Source& s);
     void removeSource(const QString& id);
@@ -92,6 +118,99 @@ private:
     // ---- view / navigation
     void setSolo(const QString& sourceId);  // empty = timeline
     void rebuildSequence();
+    Sequence timelineSequence() const;      // the project timeline with trims, regardless of solo view
+    static std::pair<int64_t, int64_t> segmentRange(const Sequence::Segment& s);
+    QVector<qint64> annotatedGlobals() const;
+
+    // ---- timeline editor (Window > Timeline)
+    void buildTimelineEditor();
+    void buildTimelineMenu();
+    void refreshTimelineEditor(bool force = false);
+    void applyWaveform(QVector<float> peaks);
+    // Applies `fn` to a copy of the timeline; when it changed anything the change becomes one undo step.
+    bool editTimeline(const std::function<bool(TimelineDoc&)>& fn, const QString& what = QString());
+    bool commitTimeline(TimelineDoc next, const QString& what, const QStringList& select = {});
+    void applyTimeline(const TimelineDoc& doc);
+    tl::LengthFn lengthFn() const;
+    tl::OnlineFn onlineFn() const;
+    int64_t sourceLength(const QString& id) const;
+    QVector<TimelineClip> clipsFor(const QStringList& sourceIds) const;  // video + linked sound
+    void appendToTimeline(const QStringList& sourceIds);
+    void insertSources(const QStringList& sourceIds, int index);
+    void dropSources(const QStringList& sourceIds, int videoTrack, int64_t frame);
+    void linkLegacyAudio();
+    void removeClip(const QString& uid);
+    void splitClip(const QString& uid, int64_t global);
+    void splitAtPlayhead();
+    void trimClip(const QString& uid, int in, int out);
+    void moveClip(const QString& uid, int index);
+    void showClipMenu(const QString& uid, int64_t frame, QPoint global);
+    void showTrackMenu(int kind, int track, QPoint global);
+    void showClipProperties(const QString& uid);
+    void setTrackState(int kind, int track, const TrackState& state);
+    QStringList videoClipOrder() const;  // video clips in timeline order (Sources list rows)
+    QImage thumbnailFor(const QString& sourceId, qint64 frame);
+    QSize canvasSize() const;
+    QRectF placementFor(const TimelineClip& c, QSize media, QSize canvas) const;
+    struct PlacedLayer {
+        const TimelineClip* clip = nullptr;
+        int64_t local = 0;
+        QRectF rect;
+        FrameServer* server = nullptr;
+    };
+    // Visible video clips at a frame, bottom first, minus whatever an opaque full-frame clip hides.
+    QVector<PlacedLayer> visibleLayers(int64_t global) const;
+    void updateLayers(const Loc& loc);
+    bool layersReady(int64_t global);
+    void showGap(int64_t global);
+    void timelineTick();
+    void jumpEditPoint(int direction);
+    void markClip();
+    void shuttle(int direction);
+    // ---- annotation clips (annotation lanes of the timeline)
+    bool editNoteClips(const QString& sourceId, const std::function<bool(Source&, int length)>& fn, const QString& what);
+    void showNoteMenu(const QString& sourceId, const QString& key, int64_t frame, QPoint global);
+    void selectNoteClip(const QString& sourceId, const QString& key);
+    QHash<QString, int> noteLanes(const Source& s);
+    // ---- timeline sound
+    void invalidateMix();
+    std::shared_ptr<const AudioMix> timelineMix();
+    void computePeaks(const QString& sourceId);
+    bool timelineAudio() const;  // the timeline view plays its own mix (not a single source's sound)
+    // ---- analysis filters (Filter menu)
+    void buildFilterMenu();
+    void setFilterMode(AnalysisFilter::Mode mode);
+    void showFilterSettings();
+    void refreshFilter();
+    void requestPlate(const QString& sourceId);
+    double effectiveThreshold();
+
+    // ---- window menu / layout
+    void buildWindowMenu();
+    void setPanelVisible(QWidget* panel, bool visible);
+    void resetLayout();
+    void restoreLayout();
+    void saveLayout();
+    void setViewerOnly(bool on);
+
+    // ---- animator tools
+    void buildNotesPanel();
+    void refreshNotes();
+    void syncNoteEditor();
+    void commitNoteEditor();
+    void setNote(const QString& sourceId, int frame, const QString& text);
+    void exportNotes();
+    void buildMotionGraph();
+    void refreshMotionGraph();
+    void playOnNs(int n);
+    void setFlip(bool on);
+    void updateHud();
+    void populateOnionMenu();
+    void reloadMedia();
+
+    // ---- help
+    void showShortcuts();
+    void openUserGuide();
     Loc locate(int64_t global);
     void goToFrame(int64_t global);
     void step(int delta);
@@ -107,6 +226,11 @@ private:
     // ---- compare
     void setCompareMode(CompareMode mode);
     void setCompareSource(const QString& id);
+    void setCompareByTime(bool byTime);
+    void setCompareOffset(int frames);
+    void refreshCompareBar();
+    // B's clock (container seconds) at the start of A's clip-local frame, for sound and export.
+    double compareClockFor(int64_t aFrame) const;
     void swapCompare();
     void chooseA(const QString& id);
     void chooseB(const QString& id);
@@ -132,7 +256,7 @@ private:
     void setMuted(bool muted);
 
     // ---- context menus
-    void addSourceActions(QMenu& menu, const QString& id, int timelineRow);
+    void addSourceActions(QMenu& menu, const QString& id, int timelineRow, const QString& clipUid = QString());
     void showViewportMenu(QPoint global, QString noteId, QString trackId);
     void showTimelineMenu(int64_t frame, QPoint global);
     void refreshShortcutHints(QMenu& menu);
@@ -182,6 +306,7 @@ private:
     void copySelection();
     void pasteClipboard();
     void deleteContextual();
+    bool timelineHasFocus() const;
     void setOnion(bool on);
     void joinSelectionToTrack(bool detach = false);
 
@@ -214,9 +339,38 @@ private:
     void updateLoopUi();
     void changeCacheBudget();
     static qint64 totalPhysicalMemory();
+    // ---- memory (adaptive cache, release while minimized / in the background)
+    void checkMemory();
+    void releaseForBackground();
+    void resumeFromBackground();
+    // ---- phone / tablet layout
+    void updateResponsiveLayout();
+    void autosaveForBackground();
 
     MediaLibrary m_media;
+    mutable QHash<QString, std::shared_ptr<const MediaInfo>> m_timingInfo;
     Project m_project;
+    // 1.1 timeline
+    bool m_editorStale = true;
+    std::shared_ptr<const AudioMix> m_mix;
+    std::map<QString, QVector<float>> m_peaks;  // per source: TimelineEditor::kPeakBins per frame
+    int m_shuttle = 0;                           // J / L speed (negative = reverse)
+    QElapsedTimer m_shuttleClock;
+    double m_shuttlePos = 0;
+    QTimer m_shuttleTimer;
+    QString m_layersKey;                         // what the viewer's layers show (skip identical updates)
+    QHash<QString, QHash<QString, int>> m_laneCache;  // source -> object -> display lane
+    quint64 m_annotationRev = 0;
+    QHash<QString, quint64> m_laneRev;
+    // analysis filters
+    AnalysisFilter m_filter;
+    QHash<QString, double> m_otsu;               // automatic threshold per source
+    QHash<QString, FrameCache::Ptr> m_plates;    // background plates (moving silhouette)
+    QSet<QString> m_platePending;
+    std::vector<QThread*> m_plateThreads;
+    QSet<QString> m_layerSources;                // sources drawn as layers right now
+    QVector<int64_t> m_layerExtra;               // frames of A's source shown on another track
+    QMap<int, QAction*> m_filterActions;
     QString m_projectPath;
     bool m_dirty = false;
 
@@ -226,6 +380,9 @@ private:
     int64_t m_soloIn = 0, m_soloOut = 0;
 
     CompareMode m_compareMode = CompareMode::Off;
+    CompareMode m_lastCompareMode = CompareMode::SideBySide;  // what the Compare button opens
+    int m_compareOffset = 0;  // B frames added to B's matching frame (+ = B runs ahead)
+    CompareBar* m_compareBar = nullptr;
     QString m_compareId;
     bool m_compareAutoSolo = false;
     bool m_compareByTime = true;  // B follows A by seconds (its own fps), not by frame number  // compare switched the view from the timeline to clip A
@@ -269,10 +426,50 @@ private:
     bool m_continueDrawing = false;
     AnnotationList m_clipboard;
 
+    // Onion skin (like 2D animation packages): annotation ghosts by key or by frame distance,
+    // video ghosts before / after with a step, tint colours and a falloff from the nearest ghost.
     bool m_onion = false;
+    int m_onionMode = 0;  // 0 = keys, 1 = frames
     int m_onionBefore = 2;
     int m_onionAfter = 1;
-    int m_onionVideo = 0;
+    int m_onionVideoBefore = 0;
+    int m_onionVideoAfter = 0;
+    int m_onionStep = 1;
+    double m_onionOpacity = 0.45;  // nearest ghost
+    bool m_onionTint = true;
+    bool m_onionWhilePlaying = false;
+    QColor m_onionBeforeColor{ 0xe0, 0x6c, 0x5a };
+    QColor m_onionAfterColor{ 0x5a, 0xb0, 0x7a };
+    QVector<int64_t> m_onionVideoFrames;  // source frames ghosted on A (decoded on purpose)
+    int m_stepEvery = 0;                  // stepped playback: 0 = bookmarks, N = every Nth frame
+
+    // Window menu, docks, animator panels
+    TimelineEditor* m_editor = nullptr;
+    QDockWidget* m_editorDock = nullptr;
+    QVector<float> m_wave;
+    QDockWidget* m_notesDock = nullptr;
+    QTreeWidget* m_notesTree = nullptr;
+    QPlainTextEdit* m_noteEdit = nullptr;
+    QLabel* m_noteLabel = nullptr;
+    bool m_syncingNote = false;
+    QString m_noteSource;   // what the note editor is showing
+    int m_noteFrame = -1;
+    bool m_noteDirty = false;
+    QString m_graphSignature;
+    QDockWidget* m_graphDock = nullptr;
+    MotionGraph* m_graph = nullptr;
+    QSplitter* m_leftSplit = nullptr;
+    QSplitter* m_mainSplit = nullptr;
+    QWidget* m_bottomBar = nullptr;
+    QByteArray m_defaultState;
+    bool m_viewerOnly = false;
+    QByteArray m_beforeViewerOnly;
+    QMap<QString, bool> m_panelsBeforeViewerOnly;
+    QAction* m_flipAction = nullptr;
+    QAction* m_hudAction = nullptr;
+    QAction* m_hwAction = nullptr;
+    QAction* m_mcpAction = nullptr;
+    McpServer* m_mcp = nullptr;
 
     QString m_selectedTrackId;
     QDockWidget* m_trackingManager = nullptr;
@@ -301,6 +498,7 @@ private:
     AudioEngine m_audio;
     std::map<QString, std::shared_ptr<AudioClip>> m_audioClips;
     std::vector<QThread*> m_audioThreads;
+    std::shared_ptr<std::atomic<bool>> m_audioCancel = std::make_shared<std::atomic<bool>>(false);  // closing
     QString m_audioPlayingId;
     bool m_scrubAudio = true;
     bool m_scrubSoundPending = false;
@@ -332,6 +530,20 @@ private:
     QElapsedTimer m_statClock;
     double m_measuredFps = 0.0;
     QTimer m_cacheTimer;
+    quint64 m_maskCacheRev = ~quint64(0);  // the cached-frames mask is rebuilt only when these change
+    quint64 m_seqRev = 0, m_maskSeqRev = ~quint64(0);
+    QTimer m_memoryTimer;
+    QTimer m_backgroundTimer;
+    bool m_adaptiveMemory = true;
+    bool m_trimInBackground = true;
+    bool m_memoryPressure = false;
+    bool m_releasedForBackground = false;
+    UpdateChecker* m_updates = nullptr;
+    QList<QMenu*> m_topMenus;  // menu bar order (folded into one menu on a phone)
+    QMenu* m_compactMenu = nullptr;
+    bool m_compactUi = false;
+    QWidget* m_viewerColumn = nullptr;
+    QWidget* m_rightPane = nullptr;
 
     struct Edit {
         QString sourceId;
@@ -342,6 +554,18 @@ private:
         QString trackId;
         std::optional<Track> trackBefore;
         std::optional<Track> trackAfter;
+        // Timeline edits keep the whole layout (clips, tracks).
+        bool isTimeline = false;
+        std::shared_ptr<TimelineDoc> docBefore;
+        std::shared_ptr<TimelineDoc> docAfter;
+        // Annotation clip edits keep the source's keys.
+        bool isNoteClips = false;
+        std::shared_ptr<std::map<int, AnnotationList>> keysBefore;
+        std::shared_ptr<std::map<int, AnnotationList>> keysAfter;
+        // Frame note edits
+        bool isNote = false;
+        std::optional<QString> noteBefore;
+        std::optional<QString> noteAfter;
     };
     QVector<Edit> m_undo;
     QVector<Edit> m_redo;

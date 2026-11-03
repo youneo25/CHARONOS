@@ -3,12 +3,17 @@
 #include "Palette.h"
 
 #include <QHash>
+#include <QImage>
 #include <QPainter>
+#include <QRegularExpression>
 #include <QSvgRenderer>
+
+#include <algorithm>
+#include <cmath>
 
 namespace {
 
-// Each entry is the inner SVG markup. Strokes use currentColor; `F:` marks filled shapes.
+// Each entry is the inner SVG markup on a 24x24 grid. Strokes use currentColor; `F` marks filled shapes.
 const QHash<QString, QString>& shapes()
 {
     static const QHash<QString, QString> s = {
@@ -21,6 +26,18 @@ const QHash<QString, QString>& shapes()
         { "pen", R"(<path d="M5 19l3-9 8-6 4 4-6 8z"/><path d="M5 19l7-7"/><circle cx="13" cy="11" r="1.5"/>)" },
         { "highlighter", R"(<path d="M5 16l3 3 4-3-4-4zM8 12l8-8 5 5-9 7"/><path d="M3 21h17" stroke-width="3"/>)" },
         { "eraser", R"(<path d="M8.5 19.5h11"/><path d="M5.2 14.6l8.6-8.6a2 2 0 0 1 2.8 0l2.4 2.4a2 2 0 0 1 0 2.8l-7.8 7.8a2 2 0 0 1-1.4.5H8.6a2 2 0 0 1-1.4-.6l-2-2a1.6 1.6 0 0 1 0-2.3z"/><path d="M9.5 10.3l4.2 4.2"/>)" },
+        { "lock", R"(<rect x="5.5" y="10.5" width="13" height="9" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/>)" },
+        { "unlock", R"(<rect x="5.5" y="10.5" width="13" height="9" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 6.8-1.2"/>)" },
+        { "link", R"(<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.2 1.2"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.2-1.2"/>)" },
+        { "ripple", R"(<rect x="3.5" y="7.5" width="7" height="9" rx="1.2"/><path d="M13.5 12h7M17.8 9.2l2.7 2.8-2.7 2.8"/>)" },
+        { "plus", R"(<path d="M12 5v14M5 12h14"/>)" },
+        { "eye-off", R"(<path d="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6z"/><circle cx="12" cy="12" r="2.5"/><path d="M4.5 4.5l15 15"/>)" },
+        { "silhouette", R"(<circle class="F" cx="12" cy="5.2" r="2.6"/><path class="F" d="M8.4 9.4h7.2l-1.1 6.2h-1.6l-.5 5.2h-2.8l-.5-5.2H9.5z"/>)" },
+        { "image", R"(<rect x="4" y="5.5" width="16" height="13" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="M5 17l4.5-4.5 3 3 2.5-2.5 4 4"/>)" },
+        { "layers", R"(<path d="M12 4l8 4-8 4-8-4z"/><path d="M4 12l8 4 8-4"/><path d="M4 16l8 4 8-4"/>)" },
+        { "gap", R"(<rect x="3" y="7.5" width="4.5" height="9" rx="1"/><rect x="16.5" y="7.5" width="4.5" height="9" rx="1"/><path d="M9.5 12h5M12.5 10l2 2-2 2"/>)" },
+        { "filter", R"(<path d="M4.5 5.5h15l-6 7.5v5l-3 1.5v-6.5z"/>)" },
+        { "track-add", R"(<path d="M4 7h10M4 12h10M4 17h7"/><path d="M17.5 13.5v7M14 17h7"/>)" },
         { "text", R"(<path d="M5.5 7V5h13v2"/><path d="M12 5v14"/><path d="M9.5 19h5"/>)" },
         { "arrow", R"(<path d="M5.5 18.5l13-13"/><path d="M9.5 5.5h9v9"/>)" },
         { "ellipse", R"(<ellipse cx="12" cy="12" rx="7.5" ry="6.5"/>)" },
@@ -66,21 +83,129 @@ const QHash<QString, QString>& shapes()
         { "close", R"(<path d="M7.5 7.5l9 9M16.5 7.5l-9 9"/>)" },
         { "chevron-down", R"(<path d="M7 10l5 5 5-5"/>)" },
         { "zoom", R"(<circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/>)" },
+        { "zoom-in", R"(<circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5M8 10.5h5M10.5 8v5"/>)" },
+        { "zoom-out", R"(<circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5M8 10.5h5"/>)" },
         { "settings", R"(<circle cx="12" cy="12" r="3"/><path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2M6 6l1.6 1.6M16.4 16.4L18 18M6 18l1.6-1.6M16.4 7.6L18 6"/>)" },
+        // 1.0
+        { "split", R"(<rect x="3.5" y="7" width="6.5" height="10" rx="1.5"/><rect x="14" y="7" width="6.5" height="10" rx="1.5"/><path d="M12 3.5v17"/>)" },
+        { "magnet", R"(<path d="M5.5 4.5h4v7a2.5 2.5 0 0 0 5 0v-7h4v7a6.5 6.5 0 0 1-13 0z"/><path d="M5.5 8.5h4M14.5 8.5h4"/>)" },
+        { "clock", R"(<circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/>)" },
+        { "notes", R"(<path d="M5 5h14a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5h-8.5l-4 3v-3H5a1.5 1.5 0 0 1-1.5-1.5V6.5A1.5 1.5 0 0 1 5 5z"/><path d="M8 9.5h8M8 12.5h5"/>)" },
+        { "graph", R"(<path d="M4 4.5v15h16"/><path d="M6.5 16c2.5-.5 3.5-8.5 6.5-9s3.5 5.5 6 5"/>)" },
+        { "flip", R"(<path d="M12 3.5v17" stroke-dasharray="2 2.2"/><path d="M9.5 7L4 17h5.5z"/><path d="M14.5 7L20 17h-5.5z"/>)" },
+        { "hud", R"(<rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M7 15.5h3.5M13 15.5h4"/>)" },
+        { "layout", R"(<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 9h17M9.5 9v10.5"/>)" },
+        { "ai", R"(<path d="M11 3.5l1.9 5 5 1.9-5 1.9-1.9 5-1.9-5-5-1.9 5-1.9z"/><path d="M18 14.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z"/>)" },
+        { "keyboard", R"(<rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 9.5h1M9.5 9.5h1M13 9.5h1M16.5 9.5h1M6 12.5h1M16.5 12.5h1M8.5 15h7"/>)" },
+        { "help", R"(<circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8 1c0 1.7-2.4 2-2.4 3.4"/><path d="M12 16.8h.01" stroke-width="2.2"/>)" },
+        { "steps", R"(<path d="M4 18.5h4v-4h4v-4h4v-4h4"/>)" },
     };
+    return s;
+}
+
+// Glyphs that swap with each other in one button keep one shared scale.
+const QHash<QString, QString>& families()
+{
+    static const QHash<QString, QString> f = {
+        { "play", "transport" }, { "pause", "transport" },
+        { "volume", "audio" }, { "mute", "audio" },
+        { "start", "ends" }, { "end", "ends" },
+        { "step-back", "step" }, { "step-fwd", "step" },
+        { "prev-mark", "marks" }, { "next-mark", "marks" },
+        { "undo", "history" }, { "redo", "history" },
+        { "up", "order" }, { "down", "order" },
+        { "zoom", "zoom" }, { "zoom-in", "zoom" }, { "zoom-out", "zoom" },
+    };
+    return f;
+}
+
+constexpr double kStroke = 1.6;
+constexpr double kTarget = 17.0;  // larger side of every glyph's ink box, on the 24 grid
+constexpr double kMinScale = 0.8, kMaxScale = 1.8;
+
+QString rawSvg(const QString& body, const QColor& color, double strokeWidth)
+{
+    const QString c = color.name(QColor::HexRgb);
+    QString b = body;
+    b.replace(QStringLiteral("class=\"F\""), QStringLiteral("fill=\"%1\" stroke=\"none\"").arg(c));
+    return QStringLiteral(
+               "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"%1\" "
+               "stroke-width=\"%2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">%3</svg>")
+        .arg(c)
+        .arg(strokeWidth, 0, 'f', 3)
+        .arg(b);
+}
+
+// Ink bounding box of a glyph on the 24 grid (strokes included), measured once.
+QRectF inkBox(const QString& name)
+{
+    static QHash<QString, QRectF> cache;
+    auto it = cache.find(name);
+    if (it != cache.end()) return *it;
+    constexpr int kSize = 96;  // 4 px per grid unit
+    QImage img(kSize, kSize, QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::transparent);
+    {
+        QSvgRenderer renderer(rawSvg(shapes().value(name), Qt::black, kStroke).toUtf8());
+        QPainter p(&img);
+        p.setRenderHint(QPainter::Antialiasing);
+        renderer.render(&p);
+    }
+    int left = kSize, top = kSize, right = -1, bottom = -1;
+    for (int y = 0; y < kSize; ++y) {
+        const QRgb* line = reinterpret_cast<const QRgb*>(img.constScanLine(y));
+        for (int x = 0; x < kSize; ++x)
+            if (qAlpha(line[x]) > 24) {
+                left = std::min(left, x);
+                right = std::max(right, x);
+                top = std::min(top, y);
+                bottom = std::max(bottom, y);
+            }
+    }
+    const QRectF box = right < 0 ? QRectF(0, 0, 24, 24) : QRectF(left / 4.0, top / 4.0, (right - left + 1) / 4.0, (bottom - top + 1) / 4.0);
+    cache.insert(name, box);
+    return box;
+}
+
+double scaleFor(const QString& name)
+{
+    // The stroke keeps its width when the geometry scales, so only the geometry part counts.
+    auto own = [](const QString& n) {
+        const QRectF b = inkBox(n);
+        const double side = std::max({ b.width(), b.height(), kStroke + 1.0 }) - kStroke;
+        return std::clamp((kTarget - kStroke) / side, kMinScale, kMaxScale);
+    };
+    const QString family = families().value(name);
+    if (family.isEmpty()) return own(name);
+    double s = kMaxScale;
+    for (auto it = families().begin(); it != families().end(); ++it)
+        if (it.value() == family) s = std::min(s, own(it.key()));
     return s;
 }
 
 QByteArray svgFor(const QString& name, const QColor& color)
 {
+    const QRectF box = inkBox(name);
+    const double s = scaleFor(name);
     QString body = shapes().value(name);
-    const QString c = color.name(QColor::HexRgb);
-    body.replace(QStringLiteral("class=\"F\""), QStringLiteral("fill=\"%1\" stroke=\"none\"").arg(c));
-    return QStringLiteral(
-               "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"%1\" "
-               "stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\">%2</svg>")
-        .arg(c, body)
-        .toUtf8();
+    // Strokes keep their on-screen weight after scaling.
+    static const QRegularExpression strokeAttr(QStringLiteral("stroke-width=\"([0-9.]+)\""));
+    QString scaled;
+    qsizetype last = 0;
+    for (auto m = strokeAttr.globalMatch(body); m.hasNext();) {
+        const auto match = m.next();
+        scaled += body.mid(last, match.capturedStart() - last);
+        scaled += QStringLiteral("stroke-width=\"%1\"").arg(match.captured(1).toDouble() / s, 0, 'f', 3);
+        last = match.capturedEnd();
+    }
+    scaled += body.mid(last);
+    const QPointF c = box.center();
+    const QString group = QStringLiteral("<g transform=\"translate(12 12) scale(%1) translate(%2 %3)\">%4</g>")
+                              .arg(s, 0, 'f', 4)
+                              .arg(-c.x(), 0, 'f', 3)
+                              .arg(-c.y(), 0, 'f', 3)
+                              .arg(scaled);
+    return rawSvg(group, color, kStroke / s).toUtf8();
 }
 
 } // namespace
@@ -98,6 +223,22 @@ QPixmap pixmap(const QString& name, const QColor& color, int size, qreal dpr)
     p.end();
     pm.setDevicePixelRatio(dpr);
     return pm;
+}
+
+QRectF inkBounds(const QString& name)
+{
+    // Ink box after normalisation, on the 24 grid.
+    const QRectF b = inkBox(name);
+    const double s = scaleFor(name);
+    const double w = (b.width() - kStroke) * s + kStroke, h = (b.height() - kStroke) * s + kStroke;
+    return QRectF(12 - w / 2, 12 - h / 2, w, h);
+}
+
+QStringList names()
+{
+    QStringList n = shapes().keys();
+    n.sort();
+    return n;
 }
 
 QIcon icon(const QString& name)

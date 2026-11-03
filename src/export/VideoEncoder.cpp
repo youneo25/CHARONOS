@@ -12,6 +12,8 @@ extern "C" {
 #include <QThread>
 
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstring>
 
@@ -75,7 +77,11 @@ bool VideoEncoder::open(const QString& path, Codec codec, QSize size, double fps
     if (r < 0 || !m_oc) return fail(L("Can't create output format: %1", "출력 형식을 만들 수 없습니다: %1").arg(avError(r)));
 
     const AVCodec* enc = avcodec_find_encoder_by_name(name);
+    // Builds without x264 (Android) write MPEG-4 Part 2, FFmpeg's own encoder: it plays in the
+    // usual players and doesn't depend on the device's MediaCodec, which can stall.
+    if (!enc && codec == Codec::H264) enc = avcodec_find_encoder_by_name("mpeg4");
     if (!enc) return fail(L("Encoder not found: %1", "인코더를 찾을 수 없습니다: %1").arg(QLatin1String(name)));
+    const bool fallbackMpeg4 = enc->id == AV_CODEC_ID_MPEG4;
 
     m_st = avformat_new_stream(m_oc, nullptr);
     m_enc = avcodec_alloc_context3(enc);
@@ -85,6 +91,10 @@ bool VideoEncoder::open(const QString& path, Codec codec, QSize size, double fps
     m_enc->time_base = av_inv_q(rate);
     m_enc->framerate = rate;
     m_enc->pix_fmt = pix;
+    if (fallbackMpeg4) {
+        m_enc->flags |= AV_CODEC_FLAG_QSCALE;
+        m_enc->global_quality = FF_QP2LAMBDA * 3;
+    }
     m_enc->gop_size = std::max(1, int(std::round(fps)));  // 1 s GOP: scrubs well in review tools
     m_enc->max_b_frames = codec == Codec::H264 ? 2 : 0;
     m_enc->thread_count = std::clamp(QThread::idealThreadCount(), 1, 16);  // prores_ks defaults to one thread
@@ -97,6 +107,7 @@ bool VideoEncoder::open(const QString& path, Codec codec, QSize size, double fps
     AVDictionary* opts = nullptr;
     switch (codec) {
     case Codec::H264:
+        if (fallbackMpeg4) break;
         av_dict_set(&opts, "preset", "medium", 0);
         av_dict_set(&opts, "crf", "16", 0);
         break;
@@ -159,7 +170,7 @@ bool VideoEncoder::open(const QString& path, Codec codec, QSize size, double fps
     m_headerWritten = true;
 
     m_frame = av_frame_alloc();
-    m_frame->format = pix;
+    m_frame->format = m_enc->pix_fmt;
     m_frame->width = size.width();
     m_frame->height = size.height();
     m_frame->colorspace = AVCOL_SPC_BT709;
@@ -167,7 +178,7 @@ bool VideoEncoder::open(const QString& path, Codec codec, QSize size, double fps
     av_frame_get_buffer(m_frame, 0);
     m_pkt = av_packet_alloc();
 
-    m_sws = sws_getContext(size.width(), size.height(), AV_PIX_FMT_BGRA, size.width(), size.height(), pix,
+    m_sws = sws_getContext(size.width(), size.height(), AV_PIX_FMT_BGRA, size.width(), size.height(), m_enc->pix_fmt,
                            SWS_BICUBIC | SWS_ACCURATE_RND, nullptr, nullptr, nullptr);
     const int* coeffs = sws_getCoefficients(SWS_CS_ITU709);
     sws_setColorspaceDetails(m_sws, coeffs, 1, coeffs, 0, 0, 1 << 16, 1 << 16);
@@ -188,7 +199,13 @@ bool VideoEncoder::write(const QImage& image, QString* error)
     sws_scale(m_sws, src, srcStride, 0, img.height(), m_frame->data, m_frame->linesize);
     m_frame->pts = m_pts++;
 
-    const int r = avcodec_send_frame(m_enc, m_frame);
+    int r = avcodec_send_frame(m_enc, m_frame);
+    for (int tries = 0; r == AVERROR(EAGAIN) && tries < 5000; ++tries) {
+        // Asynchronous encoders (Android MediaCodec) take new input only after output was collected.
+        if (!drain(m_enc, m_st, error)) return false;
+        r = avcodec_send_frame(m_enc, m_frame);
+        if (r == AVERROR(EAGAIN)) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
     if (r < 0) {
         if (error) *error = L("Encoding failed: %1", "인코딩 실패: %1").arg(avError(r));
         return false;
@@ -213,6 +230,32 @@ bool VideoEncoder::drain(AVCodecContext* enc, AVStream* st, QString* error)
             return false;
         }
     }
+}
+
+bool VideoEncoder::flush(AVCodecContext* enc, AVStream* st, QString* error)
+{
+    // After the end-of-stream frame every packet comes out, then EOF. An asynchronous encoder
+    // may answer "not yet" (EAGAIN) in between, so wait for it instead of dropping the tail.
+    for (int tries = 0; tries < 5000; ++tries) {
+        const int r = avcodec_receive_packet(enc, m_pkt);
+        if (r == AVERROR_EOF) return true;
+        if (r == AVERROR(EAGAIN)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+        if (r < 0) {
+            if (error) *error = L("Encoding failed: %1", "인코딩 실패: %1").arg(avError(r));
+            return false;
+        }
+        av_packet_rescale_ts(m_pkt, enc->time_base, st->time_base);
+        m_pkt->stream_index = st->index;
+        const int w = av_interleaved_write_frame(m_oc, m_pkt);
+        if (w < 0) {
+            if (error) *error = L("Write failed: %1", "파일 쓰기 실패: %1").arg(avError(w));
+            return false;
+        }
+    }
+    return true;
 }
 
 bool VideoEncoder::writeAudio(const int16_t* data, int frames, QString* error)
@@ -256,11 +299,11 @@ bool VideoEncoder::finish(QString* error)
 {
     if (!m_enc) return false;
     avcodec_send_frame(m_enc, nullptr);
-    bool ok = drain(m_enc, m_st, error);
+    bool ok = flush(m_enc, m_st, error);
     if (m_aenc) {
         ok = encodeAudio(true, error) && ok;
         avcodec_send_frame(m_aenc, nullptr);
-        ok = drain(m_aenc, m_ast, error) && ok;
+        ok = flush(m_aenc, m_ast, error) && ok;
     }
     if (m_headerWritten) av_write_trailer(m_oc);
     cleanup();
