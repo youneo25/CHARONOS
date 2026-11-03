@@ -108,7 +108,7 @@ SetupWizard::SetupWizard(QWidget* parent)
 void SetupWizard::rebuild()
 {
     Lang::set(m_korean ? Lang::Korean : Lang::English);
-    setWindowTitle(L("Welcome to %1", "%1에 오신 것을 환영합니다").arg(Edition::productName()));
+    setWindowTitle(L("Setup", "초기 설정"));  // the platform adds the product name
     delete layout();
     delete m_body;
     m_steps.clear();
