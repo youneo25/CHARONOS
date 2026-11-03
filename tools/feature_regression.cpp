@@ -18,9 +18,13 @@
 #include "analysis/AnalysisFilter.h"
 #include "media/AudioMix.h"
 #include "media/AudioClip.h"
+#include "media/FrameCache.h"
+#include "app/UpdateChecker.h"
+#include "ui/CompareBar.h"
 #include <QAction>
 #include <QAbstractItemView>
 #include <QComboBox>
+#include <QLabel>
 #include <QCheckBox>
 #include <QFileDialog>
 #include <QFontComboBox>
@@ -174,12 +178,150 @@ private slots:
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temp.path());
         QApplication::setOrganizationName("CHARONOS-regression");
         QApplication::setApplicationName("features");
+        qputenv("CHARONOS_NO_UPDATE_CHECK", "1");  // no network from the checks
+        // The 1.1 checks expect every tool on screen; 1.2 starts with only the two left panels.
+        QSettings().setValue("layout/toolStrip", true);
+        QSettings().setValue("layout/clipBar", true);
         window = std::make_unique<MainWindow>();
         window->resize(1200, 850);
         window->show();
         QVERIFY(QTest::qWaitForWindowExposed(window.get()));
     }
     void selectionOnStartup() { QCOMPARE(window->m_view->tool(), Tool::Select); }
+
+    // 1.2: a video clip picked anywhere (Sources list, timeline) moves with its linked sound.
+    void linkedPictureAndSoundMoveTogether() {
+        MainWindow w; w.resize(1200,850); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        const QString dir=QApplication::applicationDirPath();
+        w.importPaths({dir+"/qa-audio-loop.mp4"});
+        w.setSolo(QString());
+        showEditor(w); w.refreshTimelineEditor(true);
+        const QString id=w.m_project.sources[0].id, v=videoClipOf(w,id);
+        const TimelineClip* video=w.m_project.timeline.clip(v); QVERIFY(video); QVERIFY(!video->link.isEmpty());
+        const QString a=video->link;
+        // Picking the picture alone (as the Sources list does) selects its sound too.
+        w.m_editor->setSelectedClip(v);
+        QVERIFY(w.m_editor->selectedClips().contains(a));
+        const qint64 vStart=w.m_project.timeline.clip(v)->start, aStart=w.m_project.timeline.clip(a)->start;
+        w.m_editor->nudgeSelection(5);
+        QCOMPARE(w.m_project.timeline.clip(v)->start,vStart+5); QCOMPARE(w.m_project.timeline.clip(a)->start,aStart+5);
+        // A drag on the picture takes the sound along as well.
+        w.m_editor->setSelectedClips({});
+        const QPointF from=w.m_editor->clipPoint(v,0.5), to=from+QPointF(40,0);
+        dragOn(w.m_editor->canvas(),from,to);
+        const qint64 dv=w.m_project.timeline.clip(v)->start-(vStart+5), da=w.m_project.timeline.clip(a)->start-(aStart+5);
+        QVERIFY(dv>0); QCOMPARE(da,dv);
+        // A sound clip on a locked track keeps its picture in place instead of splitting the pair.
+        TrackState locked=w.m_project.timeline.audioTracks[0]; locked.locked=true; w.setTrackState(1,0,locked);
+        w.refreshTimelineEditor(true);
+        const qint64 before=w.m_project.timeline.clip(v)->start;
+        w.m_editor->setSelectedClip(v); w.m_editor->nudgeSelection(3);
+        QCOMPARE(w.m_project.timeline.clip(v)->start,before);
+        w.m_dirty=false;
+    }
+
+    // 1.2: compare bar with A / B lists, B offset and swap.
+    void compareBarPicksSourcesAndOffsetsB() {
+        MainWindow w; w.resize(1400,900); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));
+        const QString dir=QApplication::applicationDirPath();
+        w.importPaths({dir+"/qa-audio-loop.mp4"}); w.importPaths({dir+"/qa-silhouette.mp4"});
+        const QString a=w.m_project.sources[0].id, b=w.m_project.sources[1].id;
+        w.setSolo(a);
+        QVERIFY(w.m_compareBar->isHidden());
+        w.setCompareSource(b);
+        QVERIFY(w.m_compareBar->isVisible());
+        QCOMPARE(w.m_compareMode,CompareMode::SideBySide);  // the friendlier default layout
+        auto* bList=w.m_compareBar->findChild<QComboBox*>("CompareB"); QVERIFY(bList); QCOMPARE(bList->currentData().toString(),b);
+        w.setCompareByTime(false);
+        w.goToFrame(0);
+        QCOMPARE(w.compareFrameFor(0),int64_t(0));
+        w.setCompareOffset(6);
+        QCOMPARE(w.compareFrameFor(0),int64_t(6)); QCOMPARE(w.compareFrameFor(10),int64_t(16));
+        auto* offset=w.m_compareBar->findChild<QSpinBox*>("CompareOffset"); QVERIFY(offset); QCOMPARE(offset->value(),6);
+        w.setCompareByTime(true);
+        QCOMPARE(w.compareFrameFor(0),int64_t(6));  // 24 fps both: 6 frames = 0.25 s
+        QTest::qWait(300);
+        QVERIFY(w.grab().save(dir+"/qa-compare-bar.png"));
+        w.swapCompare();
+        QCOMPARE(w.m_soloId,b); QCOMPARE(w.m_compareId,a); QCOMPARE(w.m_compareOffset,-6);
+        w.setCompareMode(CompareMode::Off);
+        QVERIFY(w.m_compareBar->isHidden());
+        w.m_dirty=false;
+    }
+
+    // 1.2: a project saved on Android (or another PC) opens here when its media sits next to it.
+    void projectFromAnotherDeviceFindsMediaByName() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        QVERIFY(QDir(dir.path()).mkpath("media"));
+        const QString media=dir.path()+"/media/qa-audio-loop.mp4";
+        QVERIFY(QFile::copy(QApplication::applicationDirPath()+"/qa-audio-loop.mp4",media));
+        Project p; Source s; s.id=Project::newSourceId(); s.media.kind=MediaRef::Kind::Video; s.media.path=media; s.media.fileName="qa-audio-loop.mp4";
+        p.sources<<s;
+        const QString file=dir.path()+"/shot.frvm"; QString error; QVERIFY(p.save(file,&error));
+        QFile f(file); QVERIFY(f.open(QIODevice::ReadOnly)); QByteArray json=f.readAll(); f.close();
+        QVERIFY(json.contains(media.toUtf8()));
+        json.replace(media.toUtf8(),"/storage/emulated/0/Movies/Shots/qa-audio-loop.mp4");  // where the phone had it
+        json.replace("\"media/qa-audio-loop.mp4\"","\"qa-audio-loop.mp4\"");                  // a different folder layout
+        QVERIFY(f.open(QIODevice::WriteOnly|QIODevice::Truncate)); f.write(json); f.close();
+        Project q; QVERIFY(q.load(file,&error));
+        QCOMPARE(q.sources.size(),qsizetype(1));
+        QCOMPARE(QFileInfo(q.sources[0].media.path).canonicalFilePath(),QFileInfo(media).canonicalFilePath());
+    }
+
+    void updateCheckVersionsAndAssets() {
+        QCOMPARE(UpdateChecker::compareVersions("v1.2.0","1.1.9"),1);
+        QCOMPARE(UpdateChecker::compareVersions("1.2","1.2.0"),0);
+        QCOMPARE(UpdateChecker::compareVersions("1.2.0-beta","1.2.0"),-1);
+        QCOMPARE(UpdateChecker::compareVersions("1.10.0","1.9.9"),1);
+        const QStringList names{ "CHARONOS-1.3.0-source.zip", "CHARONOS-Lite-1.3.0-Setup-x64.exe", "CHARONOS-1.3.0-Setup-x64.exe",
+                                 "CHARONOS-Lite-1.3.0-android-arm64.apk", "CHARONOS-1.3.0-win64-portable.zip" };
+        QCOMPARE(UpdateChecker::pickAsset(names,false,false),2);
+        QCOMPARE(UpdateChecker::pickAsset(names,true,false),1);
+        QCOMPARE(UpdateChecker::pickAsset(names,true,true),3);
+        QJsonObject asset; asset["name"]="CHARONOS-9.0.0-Setup-x64.exe"; asset["browser_download_url"]="https://example.invalid/a.exe"; asset["size"]=1048576;
+        QJsonObject rel; rel["tag_name"]="v9.0.0"; rel["name"]="CHARONOS 9"; rel["body"]="notes"; rel["html_url"]="https://example.invalid/r";
+        rel["assets"]=QJsonArray{ asset };
+        const QByteArray json=QJsonDocument(rel).toJson();
+        QString error; const auto r=UpdateChecker::parseRelease(json,false,false,&error);
+        QVERIFY(error.isEmpty()); QCOMPARE(r.version,QString("9.0.0")); QCOMPARE(r.assetName,QString("CHARONOS-9.0.0-Setup-x64.exe"));
+        QCOMPARE(r.assetSize,qint64(1048576));
+        UpdateChecker::parseRelease(QJsonDocument(QJsonObject{ { "message", "API rate limit exceeded" } }).toJson(),false,false,&error);
+        QCOMPARE(error,QString("API rate limit exceeded"));
+    }
+
+    void frameCacheGivesMemoryBackUnderPressure() {
+        FrameCache cache; cache.setBudget(qint64(512)<<20);
+        const QImage img(1024,1024,QImage::Format_RGBA8888);  // 4 MB a frame
+        for (int i=0;i<64;++i) cache.insert(i,std::make_shared<const VideoFrame>(VideoFrame::fromImage(img)));
+        QVERIFY(cache.usedBytes()>=qint64(250)<<20);
+        const quint64 rev=cache.revision();
+        cache.setPressureLimit(qint64(100)<<20);
+        QVERIFY(cache.usedBytes()<=qint64(100)<<20); QVERIFY(cache.revision()!=rev);
+        QCOMPARE(cache.budget(),qint64(100)<<20); QCOMPARE(cache.configuredBudget(),qint64(512)<<20);
+        QVERIFY(!cache.hasRoomFor(qint64(4)<<20) || cache.usedBytes()+(qint64(4)<<20)<=qint64(100)<<20);
+        QVERIFY(cache.contains(63));  // the newest frames stay
+        cache.setPressureLimit(0); QCOMPARE(cache.budget(),qint64(512)<<20);
+        cache.trimTo(qint64(16)<<20); QVERIFY(cache.usedBytes()<=qint64(16)<<20);
+    }
+
+    void exportWindowLayoutAndSummary() {
+        ExportDialog::Ranges ranges; ranges.total=48; ranges.fps=24; ranges.clipEnd=47; ranges.suggestedName="shot010";
+        ranges.size=QSize(1920,1080); ranges.hasLoop=true; ranges.loopIn=10; ranges.loopOut=33;
+        ExportDialog dialog(ranges);
+        dialog.show(); QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        QCOMPARE(dialog.range(),std::make_pair(int64_t(10),int64_t(33)));  // In / Out is picked when there is one
+        dialog.setFormatIndex(3);
+        QCOMPARE(dialog.format(),ExportJob::Format::MovProRes);
+        QVERIFY(dialog.output().endsWith("shot010.mov"));
+        dialog.setFormatIndex(4);
+        QCOMPARE(dialog.format(),ExportJob::Format::PngSequence); QVERIFY(dialog.output().endsWith("shot010"));
+        QVERIFY(!dialog.audio());  // sequences have no sound
+        dialog.setFormatIndex(0); QVERIFY(dialog.output().endsWith("shot010.mp4"));
+        QVERIFY(dialog.m_sizeLabel->text().contains("1920"));
+        QVERIFY(!dialog.output().startsWith("F:/Codex"));  // 1.x's developer folder is never the default
+        QTest::qWait(100);
+        QVERIFY(dialog.grab().save(QApplication::applicationDirPath()+"/qa-export-window.png"));
+    }
     void externalVideoDrops() {
         const QString video = QApplication::applicationDirPath()+"/qa-media.mp4";
         QVERIFY(QFileInfo::exists(video));
@@ -731,14 +873,13 @@ private slots:
         });
         save->click();
         ExportDialog reloaded(ranges);
-        int index=reloaded.m_presets->findText("Regression preset"); QVERIFY(index>=0);
-        reloaded.m_presets->setCurrentIndex(index);
-        reloaded.m_presets->activated(index);
+        const auto found=reloaded.m_presets->findItems("Regression preset", Qt::MatchExactly); QCOMPARE(found.size(),1);
+        reloaded.m_presets->setCurrentItem(found.first());
         QCOMPARE(reloaded.presetValues(),dialog.presetValues());
         reloaded.show(); QTest::qWait(50);
         QVERIFY(reloaded.grab().save(QApplication::applicationDirPath()+"/qa-export-presets.png"));
         for (auto* button : reloaded.findChildren<QPushButton*>()) if (button->text()=="Delete") button->click();
-        QVERIFY(reloaded.m_presets->findText("Regression preset")<0);
+        QVERIFY(reloaded.m_presets->findItems("Regression preset", Qt::MatchExactly).isEmpty());
     }
     void canvasAnimationUndoSavePlaybackAndExport() {
         MainWindow w; w.resize(1000,750); w.show(); QVERIFY(QTest::qWaitForWindowExposed(&w));

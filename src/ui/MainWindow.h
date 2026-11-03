@@ -44,6 +44,8 @@ class Timeline;
 class TimelineEditor;
 class MotionGraph;
 class McpServer;
+class CompareBar;
+class UpdateChecker;
 struct TimelineClip;
 
 // Item data roles in the project tree / clip list. RoleId and RoleKind must stay Qt::UserRole
@@ -64,6 +66,8 @@ public:
 protected:
     void closeEvent(QCloseEvent* e) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
+    void changeEvent(QEvent* e) override;
+    void resizeEvent(QResizeEvent* e) override;
 
 private:
     friend class FeatureRegression;
@@ -222,6 +226,11 @@ private:
     // ---- compare
     void setCompareMode(CompareMode mode);
     void setCompareSource(const QString& id);
+    void setCompareByTime(bool byTime);
+    void setCompareOffset(int frames);
+    void refreshCompareBar();
+    // B's clock (container seconds) at the start of A's clip-local frame, for sound and export.
+    double compareClockFor(int64_t aFrame) const;
     void swapCompare();
     void chooseA(const QString& id);
     void chooseB(const QString& id);
@@ -330,6 +339,13 @@ private:
     void updateLoopUi();
     void changeCacheBudget();
     static qint64 totalPhysicalMemory();
+    // ---- memory (adaptive cache, release while minimized / in the background)
+    void checkMemory();
+    void releaseForBackground();
+    void resumeFromBackground();
+    // ---- phone / tablet layout
+    void updateResponsiveLayout();
+    void autosaveForBackground();
 
     MediaLibrary m_media;
     mutable QHash<QString, std::shared_ptr<const MediaInfo>> m_timingInfo;
@@ -364,6 +380,9 @@ private:
     int64_t m_soloIn = 0, m_soloOut = 0;
 
     CompareMode m_compareMode = CompareMode::Off;
+    CompareMode m_lastCompareMode = CompareMode::SideBySide;  // what the Compare button opens
+    int m_compareOffset = 0;  // B frames added to B's matching frame (+ = B runs ahead)
+    CompareBar* m_compareBar = nullptr;
     QString m_compareId;
     bool m_compareAutoSolo = false;
     bool m_compareByTime = true;  // B follows A by seconds (its own fps), not by frame number  // compare switched the view from the timeline to clip A
@@ -511,6 +530,20 @@ private:
     QElapsedTimer m_statClock;
     double m_measuredFps = 0.0;
     QTimer m_cacheTimer;
+    quint64 m_maskCacheRev = ~quint64(0);  // the cached-frames mask is rebuilt only when these change
+    quint64 m_seqRev = 0, m_maskSeqRev = ~quint64(0);
+    QTimer m_memoryTimer;
+    QTimer m_backgroundTimer;
+    bool m_adaptiveMemory = true;
+    bool m_trimInBackground = true;
+    bool m_memoryPressure = false;
+    bool m_releasedForBackground = false;
+    UpdateChecker* m_updates = nullptr;
+    QList<QMenu*> m_topMenus;  // menu bar order (folded into one menu on a phone)
+    QMenu* m_compactMenu = nullptr;
+    bool m_compactUi = false;
+    QWidget* m_viewerColumn = nullptr;
+    QWidget* m_rightPane = nullptr;
 
     struct Edit {
         QString sourceId;

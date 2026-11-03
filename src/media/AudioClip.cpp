@@ -114,6 +114,6 @@ std::shared_ptr<AudioClip> AudioClip::decode(const QString& path, QString* error
     cleanup();
 
     if (clip->pcm.empty()) return {};
-    clip->pcm.shrink_to_fit();
+    if (clip->pcm.capacity() > clip->pcm.size() + clip->pcm.size() / 16) clip->pcm.shrink_to_fit();
     return clip;
 }

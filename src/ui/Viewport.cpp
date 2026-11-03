@@ -4,6 +4,7 @@
 #include "Icons.h"
 #include "Lang.h"
 #include "model/AnnotationPainter.h"
+#include "platform/Platform.h"
 
 #include <QApplication>
 #include <QAbstractItemDelegate>
@@ -20,6 +21,8 @@
 #include <QStyleOptionViewItem>
 #include <QTimer>
 #include <QContextMenuEvent>
+#include <QDateTime>
+#include <QTouchEvent>
 #include <QCursor>
 #include <QGuiApplication>
 #include <QScreen>
@@ -41,6 +44,18 @@
 
 #include <algorithm>
 #include <cmath>
+
+
+// OpenGL ES 2 headers (Android) lack these desktop / ES 3 enums; the values are the same everywhere.
+#ifndef GL_RED
+#define GL_RED 0x1903
+#endif
+#ifndef GL_RG
+#define GL_RG 0x8227
+#endif
+#ifndef GL_RGBA8
+#define GL_RGBA8 0x8058
+#endif
 
 namespace {
 
@@ -250,7 +265,19 @@ Viewport::Viewport(QWidget* parent)
     setAcceptDrops(true);
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
-    setMinimumSize(320, 200);
+    setMinimumSize(Platform::isAndroid() ? 200 : 320, Platform::isAndroid() ? 140 : 200);
+    if (Platform::isAndroid()) setAttribute(Qt::WA_AcceptTouchEvents);
+    m_longPress = new QTimer(this);
+    m_longPress->setSingleShot(true);
+    m_longPress->setInterval(550);
+    connect(m_longPress, &QTimer::timeout, this, [this] {
+        // Long press = right click (context menus are how most commands are reached).
+        if (m_touch != TouchMode::Single) return;
+        cancelTouchAction();
+        m_touch = TouchMode::None;
+        QContextMenuEvent ce(QContextMenuEvent::Mouse, m_touchStart.toPoint(), mapToGlobal(m_touchStart.toPoint()));
+        contextMenuEvent(&ce);
+    });
 }
 
 Viewport::~Viewport()
@@ -709,7 +736,10 @@ void Viewport::initializeGL()
 {
     initializeOpenGLFunctions();
     m_program.addShaderFromSourceCode(QOpenGLShader::Vertex, kVertexShader);
-    m_program.addShaderFromSourceCode(QOpenGLShader::Fragment, kFragmentShader);
+    // OpenGL ES (Android) needs a default float precision in fragment shaders.
+    m_program.addShaderFromSourceCode(QOpenGLShader::Fragment, context()->isOpenGLES()
+                                                                   ? QByteArray("precision highp float;\nprecision highp int;\n") + kFragmentShader
+                                                                   : QByteArray(kFragmentShader));
     m_program.bindAttributeLocation("aPos", 0);
     m_program.bindAttributeLocation("aUv", 1);
     if (!m_program.link()) qWarning().noquote() << "Viewer shader:" << m_program.log();
@@ -2021,8 +2051,134 @@ void Viewport::mouseDoubleClickEvent(QMouseEvent* e)
     }
 }
 
+bool Viewport::event(QEvent* e)
+{
+    switch (e->type()) {
+    case QEvent::TouchBegin:
+    case QEvent::TouchUpdate:
+    case QEvent::TouchEnd:
+    case QEvent::TouchCancel: {
+        auto* te = static_cast<QTouchEvent*>(e);
+        if (te->device() && te->device()->type() != QInputDevice::DeviceType::TouchScreen) break;
+        handleTouch(te);
+        e->accept();
+        return true;
+    }
+    default:
+        break;
+    }
+    return QOpenGLWidget::event(e);
+}
+
+void Viewport::cancelTouchAction()
+{
+    m_longPress->stop();
+    // Undo what the first finger started before it turned into a gesture.
+    if (m_drag == Drag::Move || m_drag == Drag::Scale || m_drag == Drag::Rotate)
+        for (auto it = m_dragOrig.begin(); it != m_dragOrig.end(); ++it)
+            if (Item* item = findItem(it.key())) item->annotation = it.value();
+    if (m_drag == Drag::Erase) emit eraseEnd();
+    m_draft.reset();
+    m_drag = Drag::None;
+    m_marquee = QRectF();
+    unsetCursor();
+    update();
+}
+
+void Viewport::handleTouch(QTouchEvent* e)
+{
+    const QList<QEventPoint>& pts = e->points();
+    int down = 0;
+    for (const QEventPoint& p : pts)
+        if (p.state() != QEventPoint::Released) ++down;
+    if (e->type() == QEvent::TouchCancel) {
+        if (m_touch == TouchMode::Single) cancelTouchAction();
+        m_touch = TouchMode::None;
+        return;
+    }
+
+    // Two or more fingers: pan and pinch-zoom around their centre; three fingers scrub.
+    if (down >= 2 || m_touch == TouchMode::Gesture) {
+        if (m_touch == TouchMode::Single) cancelTouchAction();
+        if (m_touch != TouchMode::Gesture) {
+            m_touch = TouchMode::Gesture;
+            m_touchDist = 0;
+            m_touchScrub = 0;
+        }
+        if (down >= 2) {
+            const QPointF a = pts[0].position(), b = pts[1].position();
+            const QPointF c = (a + b) / 2;
+            const double d = std::max(1.0, QLineF(a, b).length());
+            if (m_touchDist > 0) {
+                if (down >= 3) {
+                    m_touchScrub += (c.x() - m_touchCenter.x()) / 10.0;
+                    const int frames = int(m_touchScrub);
+                    if (frames != 0) {
+                        m_touchScrub -= frames;
+                        emit scrubBy(frames);
+                    }
+                } else {
+                    const QPointF anchor = widgetToMedia(m_touchCenter);
+                    m_zoom = std::clamp(m_zoom * d / m_touchDist, 0.02, 64.0);
+                    m_pan += c - mediaToWidget().map(anchor);
+                    positionTextEditor();
+                    emit zoomChanged(displayScale());
+                    update();
+                }
+            }
+            m_touchDist = d;
+            m_touchCenter = c;
+        }
+        if (down == 0) m_touch = TouchMode::None;
+        return;
+    }
+
+    const QEventPoint& p = pts.first();
+    const QPointF pos = p.position();
+    const bool drawTool = m_tool == Tool::Pencil || m_tool == Tool::Pen || m_tool == Tool::Highlighter || m_tool == Tool::Eraser;
+    if (e->type() == QEvent::TouchBegin) {
+        m_touchStart = pos;
+        // With a pen in use, a resting palm or finger moves the picture instead of drawing.
+        m_touch = (m_penOnly && m_penSeen && drawTool) ? TouchMode::Pan : TouchMode::Single;
+        if (m_touch == TouchMode::Single) {
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            const bool doubleTap = now - m_lastTapMs < 350 && QLineF(pos, m_lastTapPos).length() < 24;
+            m_lastTapMs = now;
+            m_lastTapPos = pos;
+            QMouseEvent me(QEvent::MouseButtonPress, pos, p.globalPosition(), Qt::LeftButton, Qt::LeftButton, e->modifiers());
+            if (doubleTap) {
+                QMouseEvent dbl(QEvent::MouseButtonDblClick, pos, p.globalPosition(), Qt::LeftButton, Qt::LeftButton, e->modifiers());
+                mouseDoubleClickEvent(&dbl);
+            } else {
+                mousePressEvent(&me);
+                m_longPress->start();
+            }
+        }
+        return;
+    }
+    if (m_touch == TouchMode::Pan) {
+        m_pan += pos - p.lastPosition();
+        positionTextEditor();
+        update();
+        if (e->type() == QEvent::TouchEnd) m_touch = TouchMode::None;
+        return;
+    }
+    if (m_touch != TouchMode::Single) return;
+    if (QLineF(pos, m_touchStart).length() > 12) m_longPress->stop();
+    if (e->type() == QEvent::TouchUpdate) {
+        QMouseEvent me(QEvent::MouseMove, pos, p.globalPosition(), Qt::NoButton, Qt::LeftButton, e->modifiers());
+        mouseMoveEvent(&me);
+    } else if (e->type() == QEvent::TouchEnd) {
+        m_longPress->stop();
+        QMouseEvent me(QEvent::MouseButtonRelease, pos, p.globalPosition(), Qt::LeftButton, Qt::NoButton, e->modifiers());
+        mouseReleaseEvent(&me);
+        m_touch = TouchMode::None;
+    }
+}
+
 void Viewport::tabletEvent(QTabletEvent* e)
 {
+    m_penSeen = true;
     // All three freehand styles use pressure. Everything else falls through to the synthesized mouse events.
     if ((m_tool != Tool::Pencil && m_tool != Tool::Pen && m_tool != Tool::Highlighter) || !m_a.frame || e->pointerType() == QPointingDevice::PointerType::Eraser) {
         e->ignore();

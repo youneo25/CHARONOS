@@ -31,8 +31,13 @@ public:
 
     void setCacheBudget(qint64 bytes) { m_cache->setBudget(bytes); }
     void clearCache() { m_cache->clear(); }
-    qint64 cacheBudget() const { return m_cache->budget(); }
+    qint64 cacheBudget() const { return m_cache->configuredBudget(); }
+    qint64 cacheLimit() const { return m_cache->budget(); }  // lower while the system is short of RAM
     qint64 cacheUsed() const { return m_cache->usedBytes(); }
+    void setCachePressureLimit(qint64 bytes) { m_cache->setPressureLimit(bytes); }
+    qint64 cachePressureLimit() const { return m_cache->pressureLimit(); }
+    void trimCache(qint64 bytes) { m_cache->trimTo(bytes); }
+    quint64 cacheRevision() const { return m_cache->revision(); }
 
 signals:
     void frameReady(const QString& id, qint64 index);

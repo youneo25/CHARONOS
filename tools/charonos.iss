@@ -1,4 +1,4 @@
-#ifndef PackageDir
+﻿#ifndef PackageDir
   #error PackageDir must point to the deployed application folder
 #endif
 #ifndef Version
@@ -10,22 +10,37 @@
 #ifndef PackageVersion
   #define PackageVersion Version
 #endif
+; Full edition by default; the Lite edition passes /DLite (own AppId, folder and exe name, so
+; both can be installed side by side).
+#ifdef Lite
+  #define AppName "CHARONOS Lite"
+  #define ExeName "CHARONOS-Lite.exe"
+  #define AppGuid "{{7C1E4B52-3D0A-4F6E-9B7F-2A61C4D8E913}"
+  #define SetupBase "CHARONOS-Lite"
+  #define ProgId "CHRONOS.Lite.Project"
+#else
+  #define AppName "CHARONOS"
+  #define ExeName "CHARONOS.exe"
+  #define AppGuid "{{541A5B3B-408C-478D-AD80-2AE20787183E}"
+  #define SetupBase "CHARONOS"
+  #define ProgId "CHRONOS.Project"
+#endif
 
 [Setup]
-AppId={{541A5B3B-408C-478D-AD80-2AE20787183E}
-AppName=CHARONOS
+AppId={#AppGuid}
+AppName={#AppName}
 AppVersion={#DisplayVersion}
 AppPublisher=CHARONOS
 AppComments=Frame-accurate reference review and analysis for animators
-DefaultDirName={localappdata}\Programs\CHARONOS
-DefaultGroupName=CHARONOS
+DefaultDirName={localappdata}\Programs\{#AppName}
+DefaultGroupName={#AppName}
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
-OutputBaseFilename=CHARONOS-{#PackageVersion}-Setup-x64
+OutputBaseFilename={#SetupBase}-{#PackageVersion}-Setup-x64
 SetupIconFile=..\res\app.ico
-UninstallDisplayIcon={app}\CHARONOS.exe
+UninstallDisplayIcon={app}\{#ExeName}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -50,18 +65,18 @@ Name: "associatefrvm"; Description: "Associate .frvm project files with CHARONOS
 Source: "{#PackageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\CHARONOS"; Filename: "{app}\CHARONOS.exe"; Tasks: startmenu
-Name: "{group}\CHARONOS User Guide"; Filename: "{app}\docs\CHARONOS-User-Guide.html"; Tasks: startmenu
-Name: "{autodesktop}\CHARONOS"; Filename: "{app}\CHARONOS.exe"; Tasks: desktopicon
+Name: "{group}\{#AppName}"; Filename: "{app}\{#ExeName}"; Tasks: startmenu
+Name: "{group}\{#AppName} User Guide"; Filename: "{app}\docs\CHARONOS-User-Guide.html"; Tasks: startmenu
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#ExeName}"; Tasks: desktopicon
 
 [Registry]
-Root: HKCU; Subkey: "Software\Classes\.frvm\OpenWithProgids"; ValueType: string; ValueName: "CHRONOS.Project"; ValueData: ""; Flags: uninsdeletevalue; Tasks: associatefrvm
-Root: HKCU; Subkey: "Software\Classes\CHRONOS.Project"; ValueType: string; ValueName: ""; ValueData: "CHARONOS Project"; Flags: uninsdeletekey; Tasks: associatefrvm
-Root: HKCU; Subkey: "Software\Classes\CHRONOS.Project\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\CHARONOS.exe"",0"; Tasks: associatefrvm
-Root: HKCU; Subkey: "Software\Classes\CHRONOS.Project\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\CHARONOS.exe"" ""%1"""; Tasks: associatefrvm
+Root: HKCU; Subkey: "Software\Classes\.frvm\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: associatefrvm
+Root: HKCU; Subkey: "Software\Classes\{#ProgId}"; ValueType: string; ValueName: ""; ValueData: "CHARONOS Project"; Flags: uninsdeletekey; Tasks: associatefrvm
+Root: HKCU; Subkey: "Software\Classes\{#ProgId}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\{#ExeName}"",0"; Tasks: associatefrvm
+Root: HKCU; Subkey: "Software\Classes\{#ProgId}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#ExeName}"" ""%1"""; Tasks: associatefrvm
 
 [Run]
-Filename: "{app}\CHARONOS.exe"; Description: "{cm:LaunchProgram,CHARONOS}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#ExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
 
 [CustomMessages]
 english.CreateStartMenuIcon=Create a Start menu shortcut

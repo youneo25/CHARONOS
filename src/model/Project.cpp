@@ -37,14 +37,48 @@ std::map<int, AnnotationList> framesFromJson(const QJsonValue& v)
     return m;
 }
 
-QString resolvePath(const QString& absolute, const QString& relative, const QString& projectDir)
+QString baseName(const QString& path)
+{
+    const qsizetype cut = std::max(path.lastIndexOf(QLatin1Char('/')), path.lastIndexOf(QLatin1Char('\\')));
+    return path.mid(cut + 1);
+}
+
+// A project saved on another device (Android <-> Windows) keeps paths that don't exist here.
+// Media usually travels next to the project: look for the file by name in the project folder,
+// its subfolders (two levels) and the folder above.
+QString findByName(const QString& name, const QString& projectDir, QString* foundDir)
+{
+    if (name.isEmpty() || projectDir.isEmpty()) return {};
+    if (foundDir && !foundDir->isEmpty()) {  // the rest of an image sequence: where its first frame was
+        const QString p = QDir(*foundDir).filePath(name);
+        if (QFileInfo::exists(p)) return p;
+    }
+    QVector<std::pair<QString, int>> queue{ { projectDir, 0 }, { QDir::cleanPath(projectDir + QStringLiteral("/..")), 1 } };
+    int visited = 0;
+    while (!queue.isEmpty() && visited < 400) {
+        const auto [dir, depth] = queue.takeFirst();
+        ++visited;
+        const QString p = QDir(dir).filePath(name);
+        if (QFileInfo::exists(p)) {
+            if (foundDir) *foundDir = dir;
+            return QDir::cleanPath(p);
+        }
+        if (depth >= 2) continue;
+        for (const QString& sub : QDir(dir).entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks))
+            queue.append({ QDir(dir).filePath(sub), depth + 1 });
+    }
+    return {};
+}
+
+QString resolvePath(const QString& absolute, const QString& relative, const QString& projectDir, QString* foundDir = nullptr)
 {
     if (!absolute.isEmpty() && QFileInfo::exists(absolute)) return absolute;
     if (!relative.isEmpty() && !projectDir.isEmpty()) {
-        const QString p = QDir(projectDir).absoluteFilePath(relative);
+        const QString p = QDir(projectDir).absoluteFilePath(QString(relative).replace(QLatin1Char('\\'), QLatin1Char('/')));
         if (QFileInfo::exists(p)) return QDir::cleanPath(p);
     }
-    return absolute;
+    const QString found = findByName(baseName(!relative.isEmpty() ? relative : absolute), projectDir, foundDir);
+    return found.isEmpty() ? absolute : found;
 }
 
 QJsonObject mediaToJson(const MediaRef& m, const QDir& dir)
@@ -89,8 +123,9 @@ MediaRef mediaFromJson(const QJsonObject& m, const QString& dir)
     } else if (type == "imageSequence") {
         r.kind = MediaRef::Kind::ImageSequence;
         const QJsonArray abs = m.value("frames").toArray(), rel = m.value("relativeFrames").toArray();
+        QString relocated;  // a moved sequence: every frame is in the folder where the first one was found
         for (qsizetype i = 0; i < abs.size(); ++i)
-            r.frames << resolvePath(abs[i].toString(), i < rel.size() ? rel[i].toString() : QString(), dir);
+            r.frames << resolvePath(abs[i].toString(), i < rel.size() ? rel[i].toString() : QString(), dir, &relocated);
     }
     return r;
 }

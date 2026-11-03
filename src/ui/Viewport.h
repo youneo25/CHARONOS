@@ -12,11 +12,13 @@
 #include <QOpenGLShaderProgram>
 #include <QOpenGLWidget>
 #include <QSet>
+#include <QTimer>
 
 #include <optional>
 
 class QOpenGLFramebufferObject;
 class QPlainTextEdit;
+class QTouchEvent;
 
 enum class Tool { Select, Pencil, Pen, Highlighter, Line, Arrow, Rect, Circle, Text, Eraser, Track };
 enum class CompareMode { Off, Wipe, SideBySide, TopBottom, Blend };
@@ -119,6 +121,9 @@ public:
     bool showGrid() const { return m_showGrid; }
     void setPlaceholder(const QString& text);
     void setEndlessScrubbing(bool enabled) { m_endlessScrubbing = enabled; }
+    // Touch screens: once a pen has drawn, a finger pans instead of drawing (palm rejection).
+    void setPenOnlyDrawing(bool on) { m_penOnly = on; }
+    bool penOnlyDrawing() const { return m_penOnly; }
     void fitToView();
     void setZoom(double zoom);
     double zoom() const { return m_zoom; }
@@ -165,6 +170,7 @@ protected:
     void dropEvent(QDropEvent* e) override;
     void leaveEvent(QEvent* e) override;
     bool eventFilter(QObject* obj, QEvent* e) override;
+    bool event(QEvent* e) override;
 
 private:
     friend class FeatureRegression;
@@ -229,6 +235,10 @@ private:
     QRectF annotationClip(int side) const;
     bool nearWipe(const QPointF& widgetPos) const;
     void wrapCursor(const QPointF& localPos);
+    // Touch: one finger acts like the mouse (draw / select), two fingers pan and pinch-zoom,
+    // three fingers drag to scrub, a long press opens the context menu.
+    void handleTouch(QTouchEvent* e);
+    void cancelTouchAction();
 
     Item* findItem(const QString& id);
     QString hitItem(const QPointF& mediaPt, bool includeLocked = false) const;
@@ -328,6 +338,17 @@ private:
     QPointF m_lastMouse;
     QPointF m_hover{ -1, -1 };
     bool m_tabletStroke = false;
+    enum class TouchMode { None, Single, Pan, Gesture };
+    TouchMode m_touch = TouchMode::None;
+    double m_touchDist = 0;
+    QPointF m_touchCenter;
+    QPointF m_touchStart;
+    double m_touchScrub = 0;
+    qint64 m_lastTapMs = 0;
+    QPointF m_lastTapPos;
+    QTimer* m_longPress = nullptr;
+    bool m_penOnly = true;
+    bool m_penSeen = false;
     double m_scrubAcc = 0.0;  // current draft comes from a pen (records pressure)
     bool m_endlessScrubbing = true;
 };

@@ -39,6 +39,9 @@ public:
     bool decodeFrame(int64_t index, VideoFrame& out, QString* error, const FrameSink* sink = nullptr) override;
     const Stats& stats() const { return m_stats; }
     bool hardwareActive() const { return m_hwActive; }
+    // Frees the codec context (and its frame-thread pools) while the file stays open and
+    // indexed; the next decode reopens it.
+    void releaseIdleResources() override;
 
     // Global switch read when a file is opened (Tools > Hardware Decoding). Default on.
     static void setHardwareDecodingEnabled(bool on);
@@ -50,6 +53,7 @@ public:
 private:
     void close();
     bool openCodec(bool hardware, QString* error);
+    bool reopenAfterRelease(QString* error);
     bool probeHardware();
     void fallbackToSoftware();
     bool buildIndex(QString* error);
@@ -84,5 +88,7 @@ private:
     bool m_transferred = false;  // m_swFrame holds m_frame's pixels
     bool m_hwActive = false;     // decoding on NVDEC
     bool m_hwCounted = false;    // holds one of the limited hardware sessions
+    bool m_released = false;     // codec freed by releaseIdleResources()
+    bool m_releasedHw = false;   // it was decoding on NVDEC then
     Stats m_stats;
 };

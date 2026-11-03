@@ -13,7 +13,13 @@
 #include "ui/HotkeyManager.h"
 #include "media/CanvasSource.h"
 #include "media/VideoDecoder.h"
+#ifndef CHARONOS_LITE
 #include "ai/McpServer.h"
+#endif
+#include "app/Edition.h"
+#include "app/UpdateChecker.h"
+#include "platform/Platform.h"
+#include "ui/CompareBar.h"
 #include "ui/MotionGraph.h"
 #include "ui/TimelineEditor.h"
 #include <QDirIterator>
@@ -73,10 +79,11 @@
 #include <QUuid>
 #include <QVBoxLayout>
 #include <QWidgetAction>
+#include <QButtonGroup>
+#include <QRadioButton>
+#include <QResizeEvent>
 
 #include <atomic>
-
-#include <windows.h>
 
 namespace {
 
@@ -145,10 +152,14 @@ MainWindow::MainWindow(QWidget* parent)
     setObjectName("MainWindow");
     m_realtime = settings.value("realtimePlayback", false).toBool();
     {
-        // Keep the cache inside physical RAM even if the setting came from a bigger machine.
+        // A preset (light / balanced / high, chosen in setup) unless a size was set by hand; always
+        // inside physical RAM even if the setting came from a bigger machine. 1.x used half the RAM.
         const qint64 ram = totalPhysicalMemory();
-        const qint64 saved = settings.value("cacheBudgetBytes", ram / 2).toLongLong();
-        m_media.setCacheBudget(std::clamp<qint64>(saved, qint64(256) << 20, std::max<qint64>(qint64(512) << 20, ram - (qint64(2) << 30))));
+        const qint64 wanted = settings.contains("cacheBudgetBytes") ? settings.value("cacheBudgetBytes").toLongLong()
+                                                                     : Platform::cacheBudgetForPreset(settings.value("cache/preset", 1).toInt());
+        m_media.setCacheBudget(std::clamp<qint64>(wanted, qint64(256) << 20, std::max<qint64>(qint64(512) << 20, ram - (qint64(2) << 30))));
+        m_adaptiveMemory = settings.value("memory/adaptive", true).toBool();
+        m_trimInBackground = settings.value("memory/trimWhenMinimized", true).toBool();
     }
     VideoDecoder::setHardwareDecodingEnabled(settings.value("decode/hardware", true).toBool());
 
@@ -160,10 +171,14 @@ MainWindow::MainWindow(QWidget* parent)
     m_timeline->setEndlessScrubbing(m_endlessScrubbing);
 
     auto* viewerColumn = new QWidget;
+    m_viewerColumn = viewerColumn;
     auto* vc = new QVBoxLayout(viewerColumn);
     vc->setContentsMargins(0, 0, 0, 0);
     vc->setSpacing(0);
+    m_compareBar = new CompareBar;
+    m_compareBar->hide();
     vc->addWidget(m_clipBar);
+    vc->addWidget(m_compareBar);
     vc->addWidget(m_view, 1);
     vc->addWidget(m_timeline);
 
@@ -198,6 +213,7 @@ MainWindow::MainWindow(QWidget* parent)
     main->addWidget(left);
     auto* strip = buildToolStrip();
     auto* right = new QWidget;
+    m_rightPane = right;
     auto* rh = new QHBoxLayout(right);
     rh->setContentsMargins(0, 0, 0, 0);
     rh->setSpacing(0);
@@ -224,9 +240,13 @@ MainWindow::MainWindow(QWidget* parent)
     addDockWidget(Qt::BottomDockWidgetArea, m_console);
     m_console->hide();
     connect(m_console, &ConsoleDock::commandEntered, this, &MainWindow::runConsoleCommand);
+#ifndef CHARONOS_LITE
     buildTimelineEditor();
+#endif
     buildNotesPanel();
+#ifndef CHARONOS_LITE
     buildMotionGraph();
+#endif
     buildMenus();
 
     connect(&m_media, &MediaLibrary::frameReady, this, &MainWindow::onFrameReady);
@@ -284,6 +304,28 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_view, &Viewport::zoomChanged, this, [this](double s) {
         m_zoomBtn->setText(QStringLiteral("%1%").arg(qRound(s * 100)));
     });
+    connect(m_view, &Viewport::activeSideChanged, m_compareBar, &CompareBar::setEditSide);
+    connect(m_compareBar, &CompareBar::sourceAChosen, this, [this](const QString& id) {
+        const Loc loc = locate(m_current);
+        if (!loc || loc.source->id != id) chooseA(id);
+    });
+    connect(m_compareBar, &CompareBar::sourceBChosen, this, [this](const QString& id) {
+        if (id != m_compareId) setCompareSource(id);
+    });
+    connect(m_compareBar, &CompareBar::swapRequested, this, &MainWindow::swapCompare);
+    connect(m_compareBar, &CompareBar::modeChosen, this, &MainWindow::setCompareMode);
+    connect(m_compareBar, &CompareBar::syncByTimeChanged, this, &MainWindow::setCompareByTime);
+    connect(m_compareBar, &CompareBar::offsetChanged, this, &MainWindow::setCompareOffset);
+    connect(m_compareBar, &CompareBar::editSideChosen, this, [this](int side) {
+        if (m_compareMode != CompareMode::Off) m_view->setActiveSide(side);
+    });
+    connect(m_compareBar, &CompareBar::audioSourceChosen, this, [this](int mode) {
+        m_compareAudio = mode == 1 ? CompareAudio::A : mode == 2 ? CompareAudio::B : CompareAudio::Auto;
+        QSettings().setValue("audio/compare", mode == 1 ? "a" : mode == 2 ? "b" : "auto");
+        if (m_playing) syncAudio(true);
+        refreshWaveform();
+    });
+    connect(m_compareBar, &CompareBar::closeRequested, this, [this] { setCompareMode(CompareMode::Off); });
 
     m_playTimer.setTimerType(Qt::PreciseTimer);
     m_playTimer.setInterval(4);
@@ -292,11 +334,19 @@ MainWindow::MainWindow(QWidget* parent)
     m_cacheTimer.setInterval(250);
     connect(&m_cacheTimer, &QTimer::timeout, this, [this] {
         if (m_seq.total <= 0) return;
+        if (m_playing) m_timeline->setRates(viewFps(), m_measuredFps);
+        const quint64 rev = m_media.cacheRevision();
+        if (rev == m_maskCacheRev && m_seqRev == m_maskSeqRev) return;
+        m_maskCacheRev = rev;
+        m_maskSeqRev = m_seqRev;
         QBitArray mask(m_seq.total);
+        QHash<QString, QBitArray> parts;  // a source used by many segments is scanned once
         for (const Sequence::Segment& s : m_seq.segments) {
             FrameServer* srv = m_media.server(s.sourceId);
             if (!srv) continue;
-            const QBitArray part = srv->cachedMask();
+            auto partIt = parts.find(s.sourceId);
+            if (partIt == parts.end()) partIt = parts.insert(s.sourceId, srv->cachedMask());
+            const QBitArray& part = *partIt;
             for (qsizetype i = 0; i < s.count; ++i) {
                 const int64_t f = s.sourceFrame(i);
                 if (f >= 0 && f < part.size() && part.testBit(qsizetype(f))) mask.setBit(qsizetype(s.start + i));
@@ -304,14 +354,36 @@ MainWindow::MainWindow(QWidget* parent)
         }
         m_timeline->setCacheMask(mask);
         if (m_editor && m_editorDock && m_editorDock->isVisible() && m_soloId.isEmpty()) m_editor->setCacheMask(mask);
-        if (m_playing) m_timeline->setRates(viewFps(), m_measuredFps);
     });
     m_cacheTimer.start();
+
+    // Adaptive memory: the frame cache gives RAM back while the system runs short, and most of
+    // it while the window is minimized (Android: in the background).
+    m_memoryTimer.setInterval(2000);
+    connect(&m_memoryTimer, &QTimer::timeout, this, &MainWindow::checkMemory);
+    m_memoryTimer.start();
+    m_backgroundTimer.setSingleShot(true);
+    m_backgroundTimer.setInterval(Platform::isAndroid() ? 500 : 20000);
+    connect(&m_backgroundTimer, &QTimer::timeout, this, &MainWindow::releaseForBackground);
+    connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
+        if (!Platform::isAndroid()) return;
+        if (state == Qt::ApplicationActive) {
+            m_backgroundTimer.stop();
+            resumeFromBackground();
+        } else {
+            autosaveForBackground();  // Android may end a background app without asking
+            m_backgroundTimer.start();
+        }
+    });
 
     m_trackPoll.setInterval(40);
     connect(&m_trackPoll, &QTimer::timeout, this, &MainWindow::pollTracking);
 
     m_continueDrawing = settings.value("continueDrawing", false).toBool();
+    {
+        const int layout = settings.value("compare/layout", int(CompareMode::SideBySide)).toInt();
+        if (layout > int(CompareMode::Off) && layout <= int(CompareMode::Blend)) m_lastCompareMode = CompareMode(layout);
+    }
     m_onion = settings.value("onion/on", false).toBool();
     m_onionMode = std::clamp(settings.value("onion/mode", 0).toInt(), 0, 1);
     m_onionBefore = std::clamp(settings.value("onion/before", 2).toInt(), 0, 8);
@@ -352,15 +424,47 @@ MainWindow::MainWindow(QWidget* parent)
     updateReadout();
     updateHud();
 
+#ifndef CHARONOS_LITE
     // Built-in MCP endpoint for AI assistants (local named pipe, this Windows user only).
     m_mcp = new McpServer(this);
     if (settings.value("ai/mcpEnabled", true).toBool()) m_mcp->start();
     if (m_mcpAction) m_mcpAction->setChecked(m_mcp->isListening());
+#endif
+
+    // New version on GitHub? Asked once per version; Help > Check for Updates any time.
+    m_updates = new UpdateChecker(this);
+    if (settings.value("update/autoCheck", true).toBool() && !qEnvironmentVariableIsSet("CHARONOS_NO_UPDATE_CHECK"))
+        QTimer::singleShot(2500, this, [this] { m_updates->check(false); });
+    updateResponsiveLayout();
+
+    if (Platform::isAndroid()) {
+        m_view->setPenOnlyDrawing(settings.value("touch/penOnly", true).toBool());
+        QTimer::singleShot(700, this, [this] {
+            if (!Platform::hasStorageAccess() &&
+                QMessageBox::question(this, L("Storage Access", "저장소 접근"),
+                                      L("CHARONOS reads videos and saves projects in your shared folders (Movies, Documents...).\n"
+                                        "Allow access to files now?",
+                                        "CHARONOS는 공유 폴더(동영상, 문서 등)에서 영상을 읽고 프로젝트를 저장합니다.\n지금 파일 접근을 허용할까요?"))
+                    == QMessageBox::Yes)
+                Platform::requestStorageAccess();
+            // A project that was never saved is kept when Android ends the app in the background.
+            QSettings s;
+            const QString recovered = s.value("recovery/path").toString();
+            if (recovered.isEmpty() || !QFileInfo::exists(recovered) || !m_project.sources.isEmpty()) return;
+            s.remove("recovery/path");
+            if (QMessageBox::question(this, L("Recover Project", "프로젝트 복구"),
+                                      L("CHARONOS was closed with unsaved work. Open the recovered project?",
+                                        "저장하지 않은 작업이 있었습니다. 복구한 프로젝트를 열까요?")) == QMessageBox::Yes)
+                loadProject(recovered);
+        });
+    }
 }
 
 MainWindow::~MainWindow()
 {
+#ifndef CHARONOS_LITE
     if (m_mcp) m_mcp->stop();
+#endif
     *m_audioCancel = true;  // long soundtrack decodes stop instead of holding up the exit
     if (m_trackJob) m_trackJob->cancel = true;
     if (m_trackThread) {
@@ -787,16 +891,20 @@ QWidget* MainWindow::buildBottomBar()
     });
     auto* strip = iconButton("toolbar", L("Annotation Toolbar", "주석 도구 막대"), 30, 18);
     connect(strip, &QToolButton::clicked, this, [this] { m_toolStrip->setVisible(!m_toolStrip->isVisible()); });
-    m_compareBtn = iconButton("compare", L("Compare", "비교"), 30, 18);
+    m_compareBtn = iconButton("compare", L("Compare A / B  (click: on / off · arrow: layout)", "A / B 비교  (클릭: 켜기 / 끄기 · 화살표: 보기 방식)"), 42, 18);
     m_compareBtn->setCheckable(true);
-    m_compareBtn->setPopupMode(QToolButton::InstantPopup);
+    m_compareBtn->setPopupMode(QToolButton::MenuButtonPopup);
+    m_compareBtn->setObjectName("CompareButton");
+    connect(m_compareBtn, &QToolButton::clicked, this, [this] {
+        setCompareMode(m_compareMode == CompareMode::Off ? m_lastCompareMode : CompareMode::Off);
+    });
     auto* cmpMenu = new QMenu(m_compareBtn);
     const QList<std::tuple<CompareMode, QString, QString>> modes = {
         { CompareMode::Off, "", L("Compare Off", "비교 끄기") },
-        { CompareMode::Wipe, "wipe", L("Wipe", "와이프") },
         { CompareMode::SideBySide, "side", L("Side by Side", "좌우") },
         { CompareMode::TopBottom, "stack", L("Top / Bottom", "위아래") },
-        { CompareMode::Blend, "blend", L("Blend", "겹쳐 보기") },
+        { CompareMode::Wipe, "wipe", L("Wipe", "와이프") },
+        { CompareMode::Blend, "blend", L("Overlay (50%)", "겹쳐 보기 (50%)") },
     };
     for (const auto& [mode, icon, label] : modes) {
         const CompareMode m = mode;
@@ -1138,13 +1246,14 @@ void MainWindow::buildMenus()
     QAction* byTime = cmp->addAction(L("Sync B by Time", "B를 시간으로 맞추기"));
     byTime->setCheckable(true);
     byTime->setChecked(m_compareByTime);
-    connect(byTime, &QAction::toggled, this, [this](bool on) {
-        m_compareByTime = on;
-        QSettings().setValue("compare/byTime", on);
-        m_shownCompareKey.clear();
-        if (m_compareMode != CompareMode::Off && !m_soloId.isEmpty()) rebuildSequence();
-        showToast(on ? L("B synced by time", "B를 시간으로 맞춤") : L("B synced by frame number", "B를 프레임 번호로 맞춤"));
+    connect(byTime, &QAction::toggled, this, &MainWindow::setCompareByTime);
+    connect(cmp, &QMenu::aboutToShow, byTime, [this, byTime] {
+        const QSignalBlocker block(byTime);
+        byTime->setChecked(m_compareByTime);
     });
+    add(cmp, L("B Offset +1 Frame", "B 오프셋 +1 프레임"), QKeySequence(Qt::ALT | Qt::Key_BracketRight), [this] { setCompareOffset(m_compareOffset + 1); });
+    add(cmp, L("B Offset -1 Frame", "B 오프셋 -1 프레임"), QKeySequence(Qt::ALT | Qt::Key_BracketLeft), [this] { setCompareOffset(m_compareOffset - 1); });
+    cmp->addAction(L("Reset B Offset", "B 오프셋 초기화"), this, [this] { setCompareOffset(0); });
 
     buildFilterMenu();
     QMenu* marks = menuBar()->addMenu(L("Bookmarks", "북마크"));
@@ -1288,14 +1397,28 @@ void MainWindow::buildMenus()
                 return;
             if (!maybeSave()) return;
             setDirty(false);
+            if (Platform::isAndroid()) {  // an app can't relaunch itself here: close, the next start uses the new language
+                close();
+                return;
+            }
             QStringList args;
             if (!m_projectPath.isEmpty()) args << m_projectPath;
             QProcess::startDetached(QApplication::applicationFilePath(), args);
             close();
         });
     }
+    if (Platform::isAndroid()) {
+        QAction* penOnly = toolsMenu->addAction(L("Draw with Pen Only (fingers pan / zoom)", "펜으로만 그리기 (손가락은 이동 / 확대)"));
+        penOnly->setCheckable(true);
+        penOnly->setChecked(QSettings().value("touch/penOnly", true).toBool());
+        connect(penOnly, &QAction::toggled, this, [this](bool on) {
+            m_view->setPenOnlyDrawing(on);
+            QSettings().setValue("touch/penOnly", on);
+        });
+    }
     toolsMenu->addSeparator();
     m_hwAction = toolsMenu->addAction(L("Hardware Decoding (NVDEC)", "하드웨어 디코딩 (NVDEC)"));
+    m_hwAction->setVisible(!Platform::isAndroid());
     m_hwAction->setCheckable(true);
     m_hwAction->setChecked(VideoDecoder::hardwareDecodingEnabled());
     m_hwAction->setToolTip(L("Decode H.264 / HEVC / AV1 / VP9 on an NVIDIA GPU; other files and GPUs use the CPU automatically.",
@@ -1308,6 +1431,7 @@ void MainWindow::buildMenus()
                                   L("Reopen the project's media now with the new setting?", "현재 프로젝트의 미디어를 새 설정으로 다시 열까요?")) == QMessageBox::Yes)
             reloadMedia();
     });
+#ifndef CHARONOS_LITE
     QMenu* ai = toolsMenu->addMenu(Icons::icon("ai"), L("AI Assistant (MCP)", "AI 어시스턴트 (MCP)"));
     m_mcpAction = ai->addAction(L("Allow AI Assistants to Connect", "AI 어시스턴트 연결 허용"));
     m_mcpAction->setCheckable(true);
@@ -1333,6 +1457,7 @@ void MainWindow::buildMenus()
         box.setText(McpServer::aboutHtml(m_mcp && m_mcp->isListening()));
         box.exec();
     });
+#endif
     toolsMenu->addSeparator();
     toolsMenu->addAction(L("Cache Memory...", "캐시 메모리..."), this, [this] { changeCacheBudget(); });
     toolsMenu->addAction(L("Clear Cache", "캐시 비우기"), this, [this] {
@@ -1348,14 +1473,28 @@ void MainWindow::buildMenus()
     add(help, L("Keyboard Shortcuts", "단축키"), QKeySequence(Qt::Key_F1), [this] { showShortcuts(); })->setIcon(Icons::icon("keyboard"));
     help->addAction(Icons::icon("help"), L("User Guide (English)", "사용 설명서 (영문)"), this, [this] { openUserGuide(); });
     help->addSeparator();
-    help->addAction(L("About CHARONOS", "CHARONOS 정보"), this, [this] {
+    help->addAction(L("Check for Updates...", "업데이트 확인..."), this, [this] { m_updates->check(true); })->setObjectName("CheckForUpdates");
+    QAction* autoUpdate = help->addAction(L("Check for Updates at Startup", "시작할 때 업데이트 확인"));
+    autoUpdate->setCheckable(true);
+    autoUpdate->setChecked(QSettings().value("update/autoCheck", true).toBool());
+    connect(autoUpdate, &QAction::toggled, this, [](bool on) { QSettings().setValue("update/autoCheck", on); });
+    help->addAction(L("Releases on GitHub", "GitHub 릴리스"), this, [] { Platform::openExternal(Edition::releasesPage()); });
+    for (QAction* a : menuBar()->actions())
+        if (a->menu()) m_topMenus << a->menu();
+    help->addSeparator();
+    help->addAction(L("About %1", "%1 정보").arg(Edition::productName()), this, [this] {
         const bool nvdec = VideoDecoder::hardwareAvailable();
-        QMessageBox::about(this, QStringLiteral("CHARONOS"),
-            QStringLiteral("<b>CHARONOS %1</b><br>Reference review and analysis for animators.<br><br>"
-                           "C++ · Qt %2 · FFmpeg · OpenGL<br>Decoding: %3<br>Viewer: GPU Y'CbCr → RGB<br>AI: MCP server %4")
+        QString ai = Edition::lite ? QStringLiteral("Lite edition (no timeline editor / motion graph / AI)") : QString();
+#ifndef CHARONOS_LITE
+        ai = QStringLiteral("AI: MCP server %1").arg(m_mcp && m_mcp->isListening() ? QStringLiteral("on") : QStringLiteral("off"));
+#endif
+        QMessageBox::about(this, Edition::productName(),
+            QStringLiteral("<b>%5 %1</b><br>Reference review and analysis for animators.<br><br>"
+                           "C++ · Qt %2 · FFmpeg · OpenGL<br>Decoding: %3<br>Viewer: GPU Y'CbCr → RGB<br>%4<br>"
+                           "Memory: frame cache up to %6, now %7")
                 .arg(QStringLiteral(FRAMEREVIEW_VERSION), QString::fromLatin1(qVersion()),
-                     nvdec ? QStringLiteral("NVDEC + CPU") : QStringLiteral("CPU"),
-                     m_mcp && m_mcp->isListening() ? QStringLiteral("on") : QStringLiteral("off")));
+                     nvdec ? QStringLiteral("NVDEC + CPU") : QStringLiteral("CPU"), ai, Edition::productName(),
+                     formatBytes(m_media.cacheBudget()), formatBytes(m_media.cacheUsed())));
     });
 }
 
@@ -1822,6 +1961,14 @@ void MainWindow::exportDialog()
     }
     r.fps = viewFps();
     r.comparing = m_compareMode != CompareMode::Off && m_media.server(m_compareId) && m_seq.segments.size() == 1;
+    r.size = m_soloId.isEmpty() ? canvasSize() : (loc ? QSize(loc.server->info().width, loc.server->info().height) : QSize());
+    if (r.comparing && r.size.isValid()) {
+        if (m_compareMode == CompareMode::SideBySide) r.size.setWidth(r.size.width() * 2);
+        if (m_compareMode == CompareMode::TopBottom) r.size.setHeight(r.size.height() * 2);
+    }
+    r.hasAudio = m_soloId.isEmpty() ? !m_project.timeline.clips.isEmpty() && std::any_of(m_project.timeline.clips.begin(), m_project.timeline.clips.end(), [](const TimelineClip& c) { return c.isAudio(); })
+                                    : (loc && loc.server->info().hasAudio) || r.comparing;
+    r.preview = m_view->grabFramebuffer().scaled(QSize(480, 270), Qt::KeepAspectRatio, Qt::SmoothTransformation);
     if (m_filter.enabled()) r.filterName = AnalysisFilter::name(m_filter.mode);
     r.suggestedName = m_soloId.isEmpty()
                           ? (m_projectPath.isEmpty() ? QStringLiteral("timeline") : QFileInfo(m_projectPath).completeBaseName())
@@ -1896,7 +2043,7 @@ void MainWindow::exportDialog()
         const int64_t count = m_seq.segments.front().count;
         for (int64_t i = 0; i <= count; ++i) {
             if (i < count) c.bFrame.push_back(compareFrameFor(i));
-            c.bTime.push_back(m_compareByTime ? compareTimeFor(i) : bi.timeOf(i));
+            c.bTime.push_back(compareClockFor(i));
         }
     }
     if (!job.isSequence() && QFileInfo::exists(job.output) &&
@@ -1949,7 +2096,9 @@ void MainWindow::exportDialog()
     if (ok) {
         showToast(L("Export done · %1 frames · %2 s", "내보내기 완료 · %1프레임 · %2초").arg(job.frameCount()).arg(clock.elapsed() / 1000.0, 0, 'f', 1), 4000);
         const QString folder = QFileInfo(job.output).absolutePath();
-        if (QMessageBox::question(this, L("Export Done", "내보내기 완료"), L("Open the folder?\n%1", "폴더를 열까요?\n%1").arg(QDir::toNativeSeparators(job.output))) == QMessageBox::Yes)
+        if (Platform::isAndroid())
+            QMessageBox::information(this, L("Export Done", "내보내기 완료"), QDir::toNativeSeparators(job.output));
+        else if (QMessageBox::question(this, L("Export Done", "내보내기 완료"), L("Open the folder?\n%1", "폴더를 열까요?\n%1").arg(QDir::toNativeSeparators(job.output))) == QMessageBox::Yes)
             QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
     } else if (!cancel) {
         qWarning().noquote() << "Export failed:" << error;
@@ -2033,12 +2182,14 @@ void MainWindow::setSolo(const QString& sourceId)
     goToFrame(std::max<int64_t>(0, g));
     refreshProjectTree();
     m_clipList->viewport()->update();
+    refreshCompareBar();
 }
 
 void MainWindow::rebuildSequence()
 {
     if (m_playing) stopPlayback();
     m_seq = Sequence();
+    ++m_seqRev;
     if (!m_soloId.isEmpty() && !m_media.server(m_soloId)) m_soloId.clear();
     if (!m_soloId.isEmpty()) {
         // While comparing, run as long as the longer of A and B so B isn't cut off when A ends
@@ -2136,7 +2287,15 @@ double MainWindow::compareTimeFor(int64_t aFrame) const
     FrameServer* bs = m_media.server(m_compareId);
     if (!a || !bs) return 0.0;
     const double played = (a->timeOf(aFrame) - a->startTime()) * std::max(1.0, a->fps) / viewFps();
-    return bs->info().startTime() + played;
+    return bs->info().startTime() + played + m_compareOffset / std::max(1.0, bs->info().fps);
+}
+
+double MainWindow::compareClockFor(int64_t aFrame) const
+{
+    if (m_compareByTime) return compareTimeFor(aFrame);
+    FrameServer* bs = m_media.server(m_compareId);
+    if (!bs) return 0.0;
+    return bs->info().timeOf(std::max<int64_t>(0, aFrame + m_compareOffset));
 }
 
 int64_t MainWindow::compareFrameFor(int64_t aFrame) const
@@ -2144,7 +2303,7 @@ int64_t MainWindow::compareFrameFor(int64_t aFrame) const
     FrameServer* bs = m_media.server(m_compareId);
     if (!bs) return 0;
     // By time: B shows what was on its screen at the same moment (works for different and variable fps).
-    const int64_t f = m_compareByTime ? bs->info().frameAt(compareTimeFor(aFrame)) : aFrame;
+    const int64_t f = m_compareByTime ? bs->info().frameAt(compareTimeFor(aFrame)) : aFrame + m_compareOffset;
     return std::clamp<int64_t>(f, 0, bs->frameCount() - 1);
 }
 
@@ -2152,10 +2311,10 @@ int64_t MainWindow::compareSpan() const
 {
     FrameServer* bs = m_media.server(m_compareId);
     if (!bs) return 0;
-    if (!m_compareByTime) return bs->frameCount();
+    if (!m_compareByTime) return std::max<int64_t>(1, bs->frameCount() - m_compareOffset);
     const MediaInfo& b = bs->info();
-    const double bDuration = b.timeOf(b.frameCount) - b.startTime();
-    return int64_t(std::ceil(bDuration * viewFps() - 1e-6));
+    const double bDuration = b.timeOf(b.frameCount) - b.startTime() - m_compareOffset / std::max(1.0, b.fps);
+    return std::max<int64_t>(1, int64_t(std::ceil(bDuration * viewFps() - 1e-6)));
 }
 
 void MainWindow::goToFrame(int64_t global)
@@ -2585,8 +2744,54 @@ void MainWindow::setCompareSource(const QString& id)
     }
     m_view->commitEdits();
     if (m_pending) commitEdit();
+    if (id != m_compareId) m_compareOffset = 0;  // a new B starts lined up
     m_compareId = id;
-    setCompareMode(m_compareMode == CompareMode::Off ? CompareMode::Wipe : m_compareMode);
+    setCompareMode(m_compareMode == CompareMode::Off ? m_lastCompareMode : m_compareMode);
+}
+
+void MainWindow::setCompareByTime(bool byTime)
+{
+    if (byTime == m_compareByTime) return;
+    m_compareByTime = byTime;
+    QSettings().setValue("compare/byTime", byTime);
+    m_shownCompareKey.clear();
+    if (m_compareMode != CompareMode::Off && !m_soloId.isEmpty()) rebuildSequence();
+    refreshCompareBar();
+    showToast(byTime ? L("B synced by time", "B를 시간으로 맞춤") : L("B synced by frame number", "B를 프레임 번호로 맞춤"));
+}
+
+void MainWindow::setCompareOffset(int frames)
+{
+    if (frames == m_compareOffset) return;
+    m_compareOffset = frames;
+    m_shownCompareKey.clear();
+    if (m_compareMode != CompareMode::Off && !m_soloId.isEmpty()) {
+        const int64_t keep = m_current;
+        rebuildSequence();  // B's length in A frames changed
+        goToFrame(std::min<int64_t>(keep, m_seq.total - 1));
+    }
+    updateCompareFrame(m_playing);
+    refreshAnnotations();
+    if (m_playing) syncAudio(true);
+    refreshWaveform();
+    refreshCompareBar();
+}
+
+void MainWindow::refreshCompareBar()
+{
+    if (!m_compareBar) return;
+    const bool on = m_compareMode != CompareMode::Off;
+    m_compareBar->setVisible(on);
+    if (!on) return;
+    QVector<CompareBar::SourceItem> items;
+    for (const Source& s : m_project.sources) items.append({ s.id, s.displayName(), m_media.server(s.id) != nullptr });
+    const Loc loc = locate(m_current);
+    m_compareBar->setSources(items, loc ? loc.source->id : QString(), m_compareId);
+    m_compareBar->setMode(m_compareMode);
+    m_compareBar->setSyncByTime(m_compareByTime);
+    m_compareBar->setOffset(m_compareOffset);
+    m_compareBar->setEditSide(m_view->activeSide());
+    m_compareBar->setAudioSource(m_compareAudio == CompareAudio::A ? 1 : m_compareAudio == CompareAudio::B ? 2 : 0);
 }
 
 void MainWindow::chooseA(const QString& id)
@@ -2628,6 +2833,10 @@ void MainWindow::setCompareMode(CompareMode mode)
         }
     }
     m_compareMode = mode;
+    if (mode != CompareMode::Off) {
+        m_lastCompareMode = mode;
+        QSettings().setValue("compare/layout", int(mode));
+    }
     m_view->setCompareMode(mode);
     if (m_compareBtn) m_compareBtn->setChecked(mode != CompareMode::Off);
     m_shownCompareKey.clear();
@@ -2649,6 +2858,7 @@ void MainWindow::setCompareMode(CompareMode mode)
     refreshWaveform();
     refreshProjectTree();
     refreshClipList();
+    refreshCompareBar();
 }
 
 void MainWindow::swapCompare()
@@ -2663,9 +2873,11 @@ void MainWindow::swapCompare()
     m_soloId.clear();
     stopPlayback();
     m_soloId = b;
+    m_compareOffset = -m_compareOffset;  // the same moments stay side by side
     rebuildSequence();
     goToFrame(std::min<int64_t>(local, m_seq.total - 1));
     refreshProjectTree();
+    refreshCompareBar();
 }
 
 void MainWindow::updateCompareFrame(bool playing)
@@ -3844,7 +4056,7 @@ MainWindow::AudioTarget MainWindow::audioTarget()
         t.clip = it->second;
         t.id = m_compareId;
         // Same mapping as the B picture: by seconds (real speed) or by frame number (B at A's rate).
-        t.videoSec = m_compareByTime ? compareTimeFor(loc.rawLocal) : bs->info().timeOf(compareFrameFor(loc.rawLocal));
+        t.videoSec = compareClockFor(loc.rawLocal);
         t.speed = m_compareByTime ? 1.0 : viewFps() / nativeB;
         return t;
     }
@@ -3963,8 +4175,8 @@ void MainWindow::refreshWaveform()
         for (const Sequence::Segment& seg : m_seq.segments)
             for (int64_t local = 0; local < seg.count; ++local) {
                 // Compare runs on one source with no trim, so the segment frame is A's frame.
-                const double t0 = m_compareByTime ? compareTimeFor(local) : bi.timeOf(local);
-                const double t1 = m_compareByTime ? compareTimeFor(local + 1) : bi.timeOf(local + 1);
+                const double t0 = compareClockFor(local);
+                const double t1 = compareClockFor(local + 1);
                 const float v = peakOf(clip, t0, t1);
                 peaks[qsizetype(seg.start + local)] = v;
                 any = any || v > 0.002f;
@@ -4413,6 +4625,7 @@ ABDelegate* MainWindow::makeABDelegate(QObject* parent)
 
 void MainWindow::refreshProjectTree()
 {
+    refreshCompareBar();  // its A / B lists follow the project's sources
     const Loc loc = locate(m_current);
     const QString aId = loc ? loc.source->id : QString();
     m_tree->clear();
@@ -4553,7 +4766,7 @@ void MainWindow::updateTitle()
     QString name = m_projectPath.isEmpty() ? L("Untitled", "제목 없음") : QFileInfo(m_projectPath).completeBaseName();
     const Loc loc = locate(m_current);
     QString where = m_soloId.isEmpty() ? m_project.timeline.name : (loc ? loc.source->displayName() : QString());
-    setWindowTitle(QStringLiteral("%1%2  ·  %3 — CHARONOS").arg(name, m_dirty ? " *" : "", where));
+    setWindowTitle(QStringLiteral("%1%2  ·  %3 — %4").arg(name, m_dirty ? " *" : "", where, Edition::productName()));
 }
 
 void MainWindow::updateReadout()
@@ -4569,24 +4782,206 @@ void MainWindow::updateReadout()
 void MainWindow::changeCacheBudget()
 {
     const qint64 ram = totalPhysicalMemory();
-    const int maxGb = std::max(1, int(ram >> 30) - 2);
-    bool ok = false;
-    const int gb = QInputDialog::getInt(this, L("Cache Memory", "캐시 메모리"),
-        L("RAM for decoded frames (GB)\nThis PC: %1", "디코딩한 프레임용 RAM (GB)\n이 PC: %1").arg(formatBytes(ram)),
-        int(m_media.cacheBudget() >> 30), 1, maxGb, 1, &ok);
-    if (!ok) return;
-    const qint64 bytes = qint64(gb) << 30;
-    m_media.setCacheBudget(bytes);
-    QSettings().setValue("cacheBudgetBytes", bytes);
+    QSettings s;
+    QDialog dlg(this);
+    dlg.setWindowTitle(L("Cache Memory", "캐시 메모리"));
+    dlg.setMinimumWidth(460);
+    auto* v = new QVBoxLayout(&dlg);
+    v->setContentsMargins(20, 18, 20, 16);
+    v->setSpacing(8);
+    auto* info = new QLabel(L("Decoded frames are kept in RAM for real-time playback.\nThis device: %1 · in use now: %2 (frames %3)",
+                              "실시간 재생을 위해 디코딩한 프레임을 RAM에 보관합니다.\n이 기기: %1 · 현재 사용: %2 (프레임 %3)")
+                                .arg(formatBytes(ram), formatBytes(std::max<qint64>(0, Platform::processMemory())), formatBytes(m_media.cacheUsed())));
+    info->setObjectName("Muted");
+    v->addWidget(info);
+    auto* group = new QButtonGroup(&dlg);
+    const bool custom = s.contains("cacheBudgetBytes");
+    const int preset = std::clamp(s.value("cache/preset", 1).toInt(), 0, 2);
+    const std::pair<int, QString> presets[] = { { 0, L("Light", "가볍게") }, { 1, L("Balanced (recommended)", "균형 (권장)") }, { 2, L("High", "높게") } };
+    for (const auto& [id, name] : presets) {
+        auto* r = new QRadioButton(QStringLiteral("%1  ·  %2").arg(name, formatBytes(Platform::cacheBudgetForPreset(id))));
+        r->setChecked(!custom && preset == id);
+        group->addButton(r, id);
+        v->addWidget(r);
+    }
+    auto* customRow = new QHBoxLayout;
+    auto* customRadio = new QRadioButton(L("Custom", "직접 지정"));
+    customRadio->setChecked(custom);
+    group->addButton(customRadio, 3);
+    auto* gb = new QDoubleSpinBox;
+    gb->setRange(0.25, std::max(1.0, double(ram >> 20) / 1024.0 - 2.0));
+    gb->setDecimals(2);
+    gb->setSingleStep(0.5);
+    gb->setSuffix(QStringLiteral(" GB"));
+    gb->setValue(m_media.cacheBudget() / double(qint64(1) << 30));
+    connect(gb, &QDoubleSpinBox::valueChanged, customRadio, [customRadio] { customRadio->setChecked(true); });
+    customRow->addWidget(customRadio);
+    customRow->addWidget(gb);
+    customRow->addStretch(1);
+    v->addLayout(customRow);
+    v->addSpacing(6);
+    auto* adaptive = new QCheckBox(L("Adaptive: give memory back when the system runs low", "적응형: 시스템 메모리가 부족하면 자동으로 줄이기"));
+    adaptive->setChecked(m_adaptiveMemory);
+    v->addWidget(adaptive);
+    auto* trim = new QCheckBox(Platform::isAndroid() ? L("Free memory in the background", "백그라운드에서 메모리 비우기")
+                                                     : L("Free memory while minimized", "최소화하면 메모리 비우기"));
+    trim->setChecked(m_trimInBackground);
+    v->addWidget(trim);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    v->addWidget(buttons);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    qint64 bytes = 0;
+    if (group->checkedId() == 3) {
+        bytes = qint64(gb->value() * double(qint64(1) << 30));
+        s.setValue("cacheBudgetBytes", bytes);
+    } else {
+        s.remove("cacheBudgetBytes");
+        s.setValue("cache/preset", std::max(0, group->checkedId()));
+        bytes = Platform::cacheBudgetForPreset(std::max(0, group->checkedId()));
+    }
+    m_media.setCacheBudget(std::clamp<qint64>(bytes, qint64(256) << 20, std::max<qint64>(qint64(512) << 20, ram - (qint64(2) << 30))));
+    m_adaptiveMemory = adaptive->isChecked();
+    m_trimInBackground = trim->isChecked();
+    s.setValue("memory/adaptive", m_adaptiveMemory);
+    s.setValue("memory/trimWhenMinimized", m_trimInBackground);
+    checkMemory();
     refreshProperties();
+    showToast(L("Frame cache: up to %1", "프레임 캐시: 최대 %1").arg(formatBytes(m_media.cacheBudget())));
 }
 
-qint64 MainWindow::totalPhysicalMemory()
+qint64 MainWindow::totalPhysicalMemory() { return Platform::totalPhysicalMemory(); }
+
+void MainWindow::checkMemory()
 {
-    MEMORYSTATUSEX status{};
-    status.dwLength = sizeof status;
-    if (GlobalMemoryStatusEx(&status)) return qint64(status.ullTotalPhys);
-    return qint64(8) << 30;
+    const qint64 limit = m_media.cachePressureLimit();
+    const qint64 avail = m_adaptiveMemory ? Platform::availablePhysicalMemory() : -1;
+    if (avail < 0) {
+        if (limit > 0) m_media.setCachePressureLimit(0);
+        m_memoryPressure = false;
+        return;
+    }
+    const qint64 reserve = Platform::memoryReserve();
+    const qint64 used = m_media.cacheUsed();
+    const qint64 floor = qint64(192) << 20;  // the frames around the playhead always stay
+    if (avail < reserve) {
+        // Give back what the system is short of, plus a margin.
+        const qint64 next = std::max(floor, used - (reserve - avail) - (qint64(128) << 20));
+        if (limit <= 0 || next < limit) {
+            m_media.setCachePressureLimit(next);
+            if (!m_memoryPressure)
+                qInfo().noquote() << "Memory: system is low on RAM, frame cache limited to" << formatBytes(next);
+            m_memoryPressure = true;
+        }
+    } else if (limit > 0) {
+        // Enough RAM again: raise the limit gradually (refilling at once would swing straight back).
+        const qint64 spare = avail - reserve;
+        if (spare > (qint64(256) << 20)) {
+            const qint64 next = limit + spare / 2;
+            if (next >= m_media.cacheBudget()) {
+                m_media.setCachePressureLimit(0);
+                m_memoryPressure = false;
+                qInfo().noquote() << "Memory: frame cache back to" << formatBytes(m_media.cacheBudget());
+            } else {
+                m_media.setCachePressureLimit(next);
+            }
+        }
+    }
+}
+
+void MainWindow::releaseForBackground()
+{
+    if (!m_trimInBackground || m_playing || m_releasedForBackground) return;
+    const bool hidden = Platform::isAndroid() ? QGuiApplication::applicationState() != Qt::ApplicationActive : isMinimized();
+    if (!hidden) return;
+    // Stop filling the cache in the background and give most of it back; the playhead's
+    // neighbourhood comes back on its own when the window returns.
+    m_media.setActive({});
+    m_media.trimCache(Platform::isAndroid() ? 0 : m_media.cacheBudget() / 4);
+    if (m_editor) m_editor->clearThumbnails();
+    m_releasedForBackground = true;
+    qInfo().noquote() << "Memory: released frame cache while in the background, now" << formatBytes(m_media.cacheUsed());
+}
+
+void MainWindow::resumeFromBackground()
+{
+    if (!m_releasedForBackground) return;
+    m_releasedForBackground = false;
+    m_shownKey.clear();
+    if (m_seq.total > 0) goToFrame(m_current);  // requests the frame again and restarts the fill
+}
+
+void MainWindow::autosaveForBackground()
+{
+    if (!m_dirty) return;
+    if (!m_projectPath.isEmpty()) {
+        QString error;
+        if (m_project.save(m_projectPath, &error)) setDirty(false);
+        return;
+    }
+    // Never saved: keep a recovery copy that the next start offers to open.
+    const QString dir = Platform::documentsDir();
+    QDir().mkpath(dir);
+    QString error;
+    const QString path = QDir(dir).filePath(QStringLiteral("Recovered project.frvm"));
+    if (m_project.save(path, &error)) QSettings().setValue("recovery/path", path);
+}
+
+void MainWindow::changeEvent(QEvent* e)
+{
+    QMainWindow::changeEvent(e);
+    if (e->type() != QEvent::WindowStateChange || Platform::isAndroid()) return;
+    if (isMinimized()) {
+        m_backgroundTimer.start();
+    } else {
+        m_backgroundTimer.stop();
+        resumeFromBackground();
+    }
+}
+
+void MainWindow::resizeEvent(QResizeEvent* e)
+{
+    QMainWindow::resizeEvent(e);
+    updateResponsiveLayout();
+}
+
+void MainWindow::updateResponsiveLayout()
+{
+    if (!m_bottomBar) return;
+    // Phones and narrow windows: fewer readouts in the transport bar, all menus under one button,
+    // and in portrait the panels go under the viewer instead of beside it.
+    const bool compact = width() < 900;
+    const bool portrait = Platform::isAndroid() && height() > width();
+    // Touch buttons are larger, so the transport bar sheds its extras earlier on Android.
+    const int extra = Platform::isAndroid() ? 380 : 0;
+    if (m_readout) m_readout->setVisible(width() >= 760 + extra);
+    if (m_volumeSlider) m_volumeSlider->setVisible(width() >= 640 + extra);
+    if (m_zoomBtn) m_zoomBtn->setVisible(width() >= 560 + extra);
+    if (m_mainSplit && m_rightPane) {
+        const Qt::Orientation want = portrait ? Qt::Vertical : Qt::Horizontal;
+        if (m_mainSplit->orientation() != want) {
+            m_mainSplit->setOrientation(want);
+            m_mainSplit->insertWidget(portrait ? 0 : 1, m_rightPane);  // viewer on top in portrait
+            if (portrait) m_mainSplit->setSizes({ height() * 3 / 5, height() * 2 / 5 });
+            else m_mainSplit->setSizes({ 260, std::max(400, width() - 260) });
+            if (m_leftSplit) m_leftSplit->setSizes({ 1, 1 });
+            QTimer::singleShot(0, m_view, &Viewport::fitToView);  // the picture fits the rotated viewer
+        }
+    }
+    if (compact == m_compactUi || m_topMenus.isEmpty()) return;
+    m_compactUi = compact;
+    if (!Platform::isAndroid()) return;  // desktop keeps its menu bar; it scrolls on its own
+    menuBar()->clear();
+    if (compact) {
+        if (!m_compactMenu) m_compactMenu = new QMenu(L("Menu", "메뉴"), this);
+        m_compactMenu->clear();
+        for (QMenu* m : m_topMenus) m_compactMenu->addMenu(m);
+        menuBar()->addMenu(m_compactMenu);
+    } else {
+        for (QMenu* m : m_topMenus) menuBar()->addMenu(m);
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent* e)

@@ -443,6 +443,24 @@ void MainWindow::buildTimelineMenu()
         if (f != m_current) goToFrame(f);
     });
 
+    if (!m_editor) {
+        // Lite has no timeline editor; its playhead navigation stays available.
+        QMenu* nav = menuBar()->addMenu(L("Navigate", "이동"));
+        nav->setObjectName("NavigateMenu");
+        addCommand(nav, L("Go to Previous Edit", "이전 편집점"), QKeySequence(), [this] { jumpEditPoint(-1); });
+        addCommand(nav, L("Go to Next Edit", "다음 편집점"), QKeySequence(), [this] { jumpEditPoint(1); });
+        addCommand(nav, L("Mark Clip (In / Out)", "클립 구간 표시 (In / Out)"), QKeySequence(Qt::Key_X), [this] { markClip(); });
+        addCommand(nav, L("Go to In", "In으로 이동"), QKeySequence(Qt::ALT | Qt::Key_I), [this] {
+            stopPlayback();
+            goToFrame(m_soloId.isEmpty() ? m_project.timeline.loopIn : m_soloIn);
+        });
+        addCommand(nav, L("Go to Out", "Out으로 이동"), QKeySequence(Qt::ALT | Qt::Key_O), [this] {
+            stopPlayback();
+            goToFrame(m_soloId.isEmpty() ? m_project.timeline.loopOut : m_soloOut);
+        });
+        addCommand(nav, L("Play Reverse", "역재생"), QKeySequence(Qt::Key_J), [this] { shuttle(-1); });
+        return;
+    }
     QMenu* menu = menuBar()->addMenu(L("Timeline", "타임라인"));
     menu->setObjectName("TimelineMenu");
     auto editor = [this] {

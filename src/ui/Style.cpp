@@ -117,7 +117,61 @@ void applyDarkTheme(QApplication& app)
         QLabel#Muted { color: @faint; font-size: 11px; }
         QLabel#FormKey { color: @faint; }
         QStatusBar { background: @window; color: @faint; }
+
+        QRadioButton { color: @text; spacing: 8px; }
+        QRadioButton::indicator { width: 14px; height: 14px; border: 1px solid @faint; border-radius: 8px; background: @raised; }
+        QRadioButton::indicator:checked { background: @text; border: 3px solid @raised; }
+        QRadioButton:disabled { color: @faint; }
+
+        /* first-run setup */
+        #WizardSide { background: @panel; border-right: 1px solid @divider; }
+        QLabel#WizardBrand { color: @strong; font-size: 15px; font-weight: 600; }
+        QLabel#WizardStep { color: @faint; padding: 7px 10px; border-radius: 6px; }
+        QLabel#WizardStep[done="true"] { color: @dim; }
+        QLabel#WizardStep[current="true"] { color: @strong; background: @selected; }
+        QLabel#WizardTitle { color: @strong; font-size: 20px; font-weight: 600; }
+        QLabel#WizardSubtitle { color: @dim; font-size: 12px; }
+        QRadioButton#BigChoice { font-size: 14px; padding: 4px 0; }
+
+        /* compare bar */
+        #CompareBar { background: @window; border-bottom: 1px solid @divider; }
+        QLabel#BadgeA { background: #3d8bfd; color: #ffffff; border-radius: 5px; font-weight: 700; }
+        QLabel#BadgeB { background: @accentSolid; color: #ffffff; border-radius: 5px; font-weight: 700; }
+        QLabel#CompareCaption { color: @faint; padding: 0 2px 0 4px; }
+        #CompareDivider { background: @border; }
+        QToolButton#Segment { background: @raised; border: 1px solid @border; border-radius: 6px; padding: 3px 9px; }
+        QToolButton#Segment:hover { background: @hover; }
+        QToolButton#Segment:checked { background: @text; color: @window; border-color: @text; }
+        QToolButton#CompareButton { padding-right: 12px; }
+        QToolButton#CompareButton::menu-button { width: 12px; border: 0; }
+
+        /* export */
+        QLabel#SectionTitle { color: @dim; font-size: 10px; font-weight: 600; letter-spacing: 1px; }
+        #Section { background: @panel; border: 1px solid @divider; border-radius: 8px; }
+        #ExportSummary { background: @panel; border: 1px solid @divider; border-radius: 8px; }
+        QLabel#ExportPreview { background: @viewer; border-radius: 6px; color: @faint; }
+        QLabel#Estimate { color: @strong; font-size: 13px; font-weight: 600; }
+        QListWidget#PresetList { background: @panel; border: 1px solid @divider; border-radius: 8px; padding: 4px; }
+        QListWidget#PresetList::item { height: 34px; padding-left: 8px; }
+        QFrame#Divider { background: @divider; border: 0; }
+        QScrollArea { background: transparent; }
+        QScrollArea > QWidget > QWidget { background: transparent; }
     )";
+#ifdef Q_OS_ANDROID
+    // Fingers and pens: taller rows, bigger hit targets, wider scroll bars.
+    css += R"(
+        * { font-family: "Roboto", "Noto Sans CJK KR", "Noto Sans KR"; font-size: 14px; }
+        QMenu::item { padding: 10px 30px 10px 14px; }
+        QMenuBar::item { padding: 8px 14px; }
+        QPushButton { padding: 9px 18px; }
+        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { padding: 7px 9px; }
+        QTreeWidget::item, QListWidget::item { height: 40px; }
+        QCheckBox::indicator, QRadioButton::indicator { width: 20px; height: 20px; }
+        QScrollBar:vertical { width: 16px; }
+        QScrollBar:horizontal { height: 16px; }
+        QToolButton { padding: 6px; }
+    )";
+#endif
     css.replace("@window", hex(Pal::window))
         .replace("@panel", hex(Pal::panel))
         .replace("@raised", hex(Pal::raised))
@@ -130,6 +184,7 @@ void applyDarkTheme(QApplication& app)
         .replace("@text", hex(Pal::text))
         .replace("@dim", hex(Pal::textDim))
         .replace("@faint", hex(Pal::textFaint))
+        .replace("@accentSolid", hex(Pal::accent))
         .replace("@accent", rgba(Pal::accent));
     app.setStyleSheet(css);
 }

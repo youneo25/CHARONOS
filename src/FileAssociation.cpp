@@ -7,15 +7,27 @@
 #include <windows.h>
 #include <shlobj.h>
 
-bool registerFrvmAssociation()
+bool registerFrvmAssociation(bool makeDefault)
 {
     // test builds must not steal .frvm
     if (qEnvironmentVariableIsSet("CHRONOS_NO_ASSOC") || qEnvironmentVariableIsSet("FRAMEREVIEW_NO_ASSOC")) return false;
     const QString exe = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
     const QString command = QStringLiteral("\"%1\" \"%2\"").arg(exe, QStringLiteral("%1"));
-    const QString progId = QStringLiteral("CHRONOS.Project");
+    const QString progId = makeDefault ? QStringLiteral("CHRONOS.Project") : QStringLiteral("CHRONOS.Lite.Project");
 
     QSettings classes(QStringLiteral("HKEY_CURRENT_USER\\Software\\Classes"), QSettings::NativeFormat);
+    if (!makeDefault) {
+        // Lite: listed under "Open with", never taking the default away from the full build.
+        if (classes.value(progId + QStringLiteral("/shell/open/command/.")) == command) return false;
+        classes.setValue(QStringLiteral(".frvm/OpenWithProgids/") + progId, QString());
+        classes.setValue(progId + QStringLiteral("/."), QStringLiteral("CHARONOS Project (Lite)"));
+        classes.setValue(progId + QStringLiteral("/DefaultIcon/."), QStringLiteral("\"%1\",0").arg(exe));
+        classes.setValue(progId + QStringLiteral("/shell/open/command/."), command);
+        if (classes.value(QStringLiteral(".frvm/.")).toString().isEmpty()) classes.setValue(QStringLiteral(".frvm/."), progId);
+        classes.sync();
+        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+        return true;
+    }
     const bool current = classes.value(QStringLiteral(".frvm/."))                        == progId &&
                          classes.value(progId + QStringLiteral("/shell/open/command/.")) == command;
     if (current) return false;  // already points at this exe (re-registers if the exe was moved)

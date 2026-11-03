@@ -1,6 +1,7 @@
 #include "FrameServer.h"
 
 #include <QThread>
+#include <chrono>
 #include <algorithm>
 #include <utility>
 
@@ -155,8 +156,18 @@ void FrameServer::workerLoop()
         int64_t index = -1;
         {
             std::unique_lock lock(m_mutex);
-            m_cv.wait(lock, [&] { return m_stop || pickLocked(index); });
+            // After a quiet spell the decoder gives its buffers back (a project keeps every source
+            // open; only the ones in use need a live codec). The next request reopens it.
+            if (!m_cv.wait_for(lock, std::chrono::seconds(kIdleReleaseSeconds), [&] { return m_stop || pickLocked(index); })) {
+                if (m_workers.size() == 1 && m_inFlight.empty() && !m_released) {
+                    m_released = true;
+                    lock.unlock();
+                    m_source->releaseIdleResources();
+                }
+                continue;
+            }
             if (m_stop) return;
+            m_released = false;
             m_inFlight.insert(index);
         }
 

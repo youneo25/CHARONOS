@@ -63,6 +63,8 @@ private:
     int64_t m_fillCursor = 0;
     QVector<int64_t> m_extra;
     int64_t m_poster = -1;
+    static constexpr int kIdleReleaseSeconds = 20;
+    bool m_released = false;  // the source's decoder was released while idle
     std::unordered_set<int64_t> m_inFlight;
     std::unordered_set<int64_t> m_failed;
 };

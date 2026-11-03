@@ -153,6 +153,7 @@ public:
     bool snap = true;
     bool ripple = false;
     bool linked = true;
+    bool soloSelection = false;  // picked with Alt: one half of a linked pair on its own
     bool timecode = false;
     TimelineEditor::Tool tool = TimelineEditor::Tool::Select;
     std::function<QImage(const QString&, qint64)> thumbs;
@@ -456,9 +457,25 @@ public:
     const TimelineClip* clipOf(const QString& uid) const { return doc.clip(uid); }
     bool locked(const TimelineClip& c) const { return tl::trackLocked(doc, c.kind, c.track); }
     QSet<QString> expand(const QSet<QString>& ids) const { return linked ? tl::withLinks(doc, ids) : ids; }
+    // What a move / nudge / trim of `ids` really takes: the linked partners too (unless the
+    // selection was picked on purpose with Alt), and never half of a linked pair whose other
+    // half sits on a locked track: picture and sound stay in sync.
+    QSet<QString> movable(const QSet<QString>& ids) const
+    {
+        if (!linked || soloSelection) return ids;
+        QSet<QString> out = tl::withLinks(doc, ids);
+        for (const QString& uid : QSet<QString>(out)) {
+            const TimelineClip* c = clipOf(uid);
+            if (!c || !locked(*c)) continue;
+            out.remove(uid);
+            if (!c->link.isEmpty()) out.remove(c->link);
+        }
+        return out;
+    }
     void select(const QSet<QString>& ids, bool notify = true)
     {
         selected = ids;
+        soloSelection = false;
         selNoteKey.clear();
         selNoteSource.clear();
         gapKind = -1;
@@ -550,7 +567,10 @@ public:
         auto it = thumbCache.find(key);
         if (it != thumbCache.end()) return *it;
         const QImage img = thumbs(sourceId, frame);
-        if (!img.isNull()) thumbCache.insert(key, img);
+        if (!img.isNull()) {
+            if (thumbCache.size() >= 400) thumbCache.clear();  // ~18 MB at most; rebuilt from the frame cache on demand
+            thumbCache.insert(key, img);
+        }
         return img;
     }
     QString nameOf(const TimelineClip& c) const
@@ -1050,7 +1070,12 @@ public:
                 select(next);
                 return;
             }
-            if (!selected.contains(h.uid)) select(solo ? QSet<QString>{ h.uid } : expand({ h.uid }));
+            if (!selected.contains(h.uid)) {
+                select(solo ? QSet<QString>{ h.uid } : expand({ h.uid }));
+                soloSelection = solo;
+            } else if (!solo && !soloSelection) {
+                select(expand(selected));  // e.g. picked in the Sources list: take the sound along
+            }
             if (locked(*c)) return;
             pressUid = h.uid;
             pressKind = rows()[h.row].kind;
@@ -1074,11 +1099,15 @@ public:
             if (h.edge != 0) {
                 drag = Drag::Trim;
                 trimEdge = h.edge;
-                dragIds = solo ? QSet<QString>{ h.uid } : expand({ h.uid });
+                dragIds = solo ? QSet<QString>{ h.uid } : movable({ h.uid });
             } else {
                 drag = Drag::Move;
                 duplicate = e->modifiers() & Qt::AltModifier;
-                dragIds = selected;
+                dragIds = movable(selected);
+            }
+            if (dragIds.isEmpty()) {
+                drag = Drag::None;  // its linked partner is on a locked track
+                return;
             }
             snapCache = snapPoints(dragIds);
             return;
@@ -1307,7 +1336,7 @@ public:
             const int track = pressed->track + (pressed->isVideo() ? vtd : atd);
             qint64 first = s.start;
             for (const QString& uid : dragIds)
-                if (const TimelineClip* c = clipOf(uid)) first = std::min(first, tl::span(*c, len()).start);
+                if (const TimelineClip* c = clipOf(uid)) first = std::min<qint64>(first, tl::span(*c, len()).start);
             insertAt = tl::insertionPoint(doc, dragIds, kind, track, first + delta, len());
             tl::moveInsert(live, dragIds, insertAt, vtd, atd, len());
             snapAt = -1;
@@ -1835,7 +1864,8 @@ void TimelineEditor::setSelectedClips(const QStringList& uids)
     QSet<QString> ids;
     for (const QString& uid : uids)
         if (m_canvas->doc.clip(uid)) ids.insert(uid);
-    m_canvas->selected = ids;
+    m_canvas->selected = m_canvas->expand(ids);  // a picture picked elsewhere brings its sound
+    m_canvas->soloSelection = false;
     m_canvas->selNoteKey.clear();
     m_canvas->gapKind = -1;
     m_canvas->update();
@@ -1956,10 +1986,11 @@ bool TimelineEditor::splitAtPlayhead()
 void TimelineEditor::nudgeSelection(int frames)
 {
     TimelineCanvas& c = *m_canvas;
-    if (c.selected.isEmpty()) return;
+    const QSet<QString> ids = c.movable(c.selected);
+    if (ids.isEmpty()) return;
     TimelineDoc next = c.doc;
-    if (tl::moveOverwrite(next, c.selected, frames, 0, 0, false, c.len()))
-        c.commit(next, L("Nudge", "미세 이동"), QStringList(c.selected.begin(), c.selected.end()));
+    if (tl::moveOverwrite(next, ids, frames, 0, 0, false, c.len()))
+        c.commit(next, L("Nudge", "미세 이동"), QStringList(ids.begin(), ids.end()));
 }
 
 void TimelineEditor::selectAllClips()
@@ -1988,7 +2019,7 @@ void TimelineEditor::pasteAtPlayhead()
     TimelineCanvas& c = *m_canvas;
     if (c.clipboard.isEmpty() || c.current < 0) return;
     qint64 first = std::numeric_limits<qint64>::max();
-    for (const TimelineClip& x : c.clipboard) first = std::min(first, tl::span(x, c.len()).start);
+    for (const TimelineClip& x : c.clipboard) first = std::min<qint64>(first, tl::span(x, c.len()).start);
     QHash<QString, QString> renamed;
     for (const TimelineClip& x : c.clipboard) renamed[x.uid] = TimelineClip::newUid();
     TimelineDoc next = c.doc;

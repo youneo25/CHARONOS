@@ -37,4 +37,8 @@ public:
 
     // True when decode() may run concurrently from several threads.
     virtual bool supportsParallelDecode() const { return false; }
+
+    // Called from the decode thread after the source sat unused for a while: drop what can be
+    // rebuilt on the next decode (codec contexts, frame-thread buffers, scalers) to free RAM.
+    virtual void releaseIdleResources() {}
 };

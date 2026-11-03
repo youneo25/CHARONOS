@@ -5,6 +5,8 @@
 
 #include "Icons.h"
 #include "Palette.h"
+#include "app/Edition.h"
+#include "platform/Platform.h"
 #include "ui/ConsoleDock.h"
 #include "ui/HotkeyManager.h"
 #include "ui/MotionGraph.h"
@@ -525,6 +527,10 @@ void MainWindow::splitAtPlayhead()
 {
     if (!m_soloId.isEmpty()) {
         showToast(L("Splitting works on the timeline. Return to the timeline view first.", "자르기는 타임라인에서 동작합니다. 먼저 타임라인 보기로 돌아가세요."));
+        return;
+    }
+    if (!m_editor) {
+        showToast(L("Splitting clips needs the timeline editor (full edition).", "클립 자르기는 타임라인 편집기(정식 버전)에서 할 수 있습니다."));
         return;
     }
     if (m_editorStale) refreshTimelineEditor(true);
@@ -1087,7 +1093,8 @@ void MainWindow::buildWindowMenu()
         QAction* action;
     };
     auto entries = std::make_shared<QVector<Entry>>();
-    auto panel = [&](const QString& text, QWidget* widget, const QKeySequence& key, const QString& icon, const char* name) {
+    auto panel = [&](const QString& text, QWidget* widget, const QKeySequence& key, const QString& icon, const char* name) -> QAction* {
+        if (!widget) return nullptr;  // not in this edition (Lite has no timeline editor / motion graph)
         QAction* a = addCommand(win, text, key, [this, widget] {
             const bool hidden = widget->isHidden() || (widget->parentWidget() == m_leftSplit && m_leftSplit->isHidden());
             setPanelVisible(widget, hidden);
@@ -1125,7 +1132,7 @@ void MainWindow::buildWindowMenu()
         for (QWidget* w : { m_projectPanel, m_timelinePanel, m_toolStrip, static_cast<QWidget*>(m_clipBar), static_cast<QWidget*>(m_timeline), m_bottomBar })
             setPanelVisible(w, true);
     });
-    win->addAction(Icons::icon("layout"), L("Reset Layout", "레이아웃 초기화"), this, &MainWindow::resetLayout);
+    win->addAction(Icons::icon("layout"), L("Reset Layout (start layout)", "레이아웃 초기화 (시작 화면)"), this, &MainWindow::resetLayout);
     connect(win, &QMenu::aboutToShow, this, [this, entries, focus, full] {
         for (const Entry& e : *entries) {
             bool shown = !e.widget->isHidden();
@@ -1167,7 +1174,7 @@ void MainWindow::saveLayout()
     s.setValue("layout/scrubBar", !m_timeline->isHidden());
     s.setValue("layout/transport", !m_bottomBar->isHidden());
     // isVisible() would also reflect the main window being hidden during shutdown.
-    s.setValue("layout/timelineVisible", !m_editorDock->isHidden());
+    if (m_editorDock) s.setValue("layout/timelineVisible", !m_editorDock->isHidden());
 }
 
 void MainWindow::restoreLayout()
@@ -1176,14 +1183,15 @@ void MainWindow::restoreLayout()
     const QByteArray state = s.value("layout/state").toByteArray();
     const bool restored = !state.isEmpty() && restoreState(state, kLayoutVersion);
     // New installs start closed; older saved layouts retain their last dock visibility.
-    m_editorDock->setVisible(s.value("layout/timelineVisible", restored && !m_editorDock->isHidden()).toBool());
+    if (m_editorDock) m_editorDock->setVisible(s.value("layout/timelineVisible", restored && !m_editorDock->isHidden()).toBool());
     if (const QByteArray v = s.value("layout/mainSplit").toByteArray(); !v.isEmpty()) m_mainSplit->restoreState(v);
     if (const QByteArray v = s.value("layout/leftSplit").toByteArray(); !v.isEmpty()) m_leftSplit->restoreState(v);
     m_projectPanel->setVisible(s.value("layout/projectPanel", true).toBool());
     m_timelinePanel->setVisible(s.value("layout/sourcesPanel", true).toBool());
     m_leftSplit->setVisible(!m_projectPanel->isHidden() || !m_timelinePanel->isHidden());
-    m_toolStrip->setVisible(s.value("layout/toolStrip", true).toBool());
-    m_clipBar->setVisible(s.value("layout/clipBar", true).toBool());
+    // A new install shows Project View and the Default Timeline panel; other tools start hidden.
+    m_toolStrip->setVisible(s.value("layout/toolStrip", false).toBool());
+    m_clipBar->setVisible(s.value("layout/clipBar", false).toBool());
     m_timeline->setVisible(s.value("layout/scrubBar", true).toBool());
     m_bottomBar->setVisible(s.value("layout/transport", true).toBool());
     // A dock restored floating on a monitor that is gone comes back docked.
@@ -1197,11 +1205,20 @@ void MainWindow::resetLayout()
     if (isFullScreen()) showNormal();
     restoreState(m_defaultState, kLayoutVersion);
     for (QDockWidget* dock : { m_editorDock, m_notesDock, m_graphDock, m_trackingManager, static_cast<QDockWidget*>(m_console) }) {
+        if (!dock) continue;
         dock->setFloating(false);
         dock->hide();
     }
-    for (QWidget* w : { m_projectPanel, m_timelinePanel, m_toolStrip, static_cast<QWidget*>(m_clipBar), static_cast<QWidget*>(m_timeline), m_bottomBar })
-        w->show();
+    // Back to the start layout chosen in setup: Project View + Default Timeline, plus the tools
+    // that were switched on there.
+    QSettings s;
+    m_projectPanel->show();
+    m_timelinePanel->show();
+    m_toolStrip->setVisible(s.value("startLayout/toolStrip", false).toBool());
+    m_clipBar->setVisible(s.value("startLayout/clipBar", false).toBool());
+    m_timeline->setVisible(s.value("startLayout/scrubBar", true).toBool());
+    m_bottomBar->setVisible(s.value("startLayout/transport", true).toBool());
+    if (m_editorDock) m_editorDock->setVisible(s.value("startLayout/timeline", false).toBool());
     m_leftSplit->show();
     m_leftSplit->setSizes({ 1, 1 });
     m_mainSplit->setSizes({ 260, std::max(400, width() - 260) });
@@ -1885,6 +1902,10 @@ void MainWindow::openUserGuide()
             QDesktopServices::openUrl(QUrl::fromLocalFile(path));
             return;
         }
+    if (Platform::isAndroid()) {  // no local copy in the APK: the guide on GitHub
+        Platform::openExternal(QStringLiteral("https://github.com/%1/blob/main/docs/CHARONOS-User-Guide.html").arg(Edition::repository()));
+        return;
+    }
     QMessageBox::information(this, L("User Guide", "사용 설명서"),
                              L("The guide wasn't found next to CHARONOS.exe (docs\\CHARONOS-User-Guide.html). Reinstall CHARONOS to restore it.",
                                "CHARONOS.exe 옆에서 설명서(docs\\CHARONOS-User-Guide.html)를 찾지 못했습니다. 다시 설치하면 복원됩니다."));

@@ -1,6 +1,29 @@
-# CHARONOS 1.1 (C++ / Qt6 / FFmpeg / OpenGL)
+# CHARONOS 1.2 (C++ / Qt6 / FFmpeg / OpenGL)
 
-애니메이터를 위한 프레임 단위 레퍼런스 리뷰·분석 도구. 사용 설명서(영문): [docs/CHARONOS-User-Guide.html](docs/CHARONOS-User-Guide.html) (앱의 Help › User Guide). 검증: [docs/QA-1.1.0.md](docs/QA-1.1.0.md).
+애니메이터를 위한 프레임 단위 레퍼런스 리뷰·분석 도구. 사용 설명서(영문): [docs/CHARONOS-User-Guide.html](docs/CHARONOS-User-Guide.html) (앱의 Help › User Guide). 변경 내역: [docs/CHANGES-1.2.0.md](docs/CHANGES-1.2.0.md).
+
+## 받기
+
+[Releases](https://github.com/youneo25/CHARONOS/releases)에서 받으세요.
+
+| 버전 | 파일 | 내용 |
+| --- | --- | --- |
+| **CHARONOS** (Windows) | `CHARONOS-<버전>-Setup-x64.exe` / `-win64-portable.zip` | 전체 기능 (타임라인 편집기, 모션 그래프, AI / MCP 포함) |
+| **CHARONOS Lite** (Windows) | `CHARONOS-Lite-<버전>-Setup-x64.exe` / `-win64-portable.zip` | 타임라인 편집기, 모션 그래프, MCP / AI 제외 |
+| **CHARONOS Lite** (Android 8.0+, arm64) | `CHARONOS-Lite-<버전>-android-arm64.apk` | Lite와 같은 기능, 휴대폰 / 태블릿 화면, 펜 필압, 터치 제스처 |
+
+세 버전 모두 같은 `.frvm` 프로젝트를 읽고 씁니다. 미디어를 프로젝트 옆(같은 폴더나 하위 폴더)에 두고 폴더째 옮기면 Android ↔ Windows로 그대로 열립니다. 포터블 ZIP은 exe 옆에 `portable.ini` 파일을 만들면 설정을 레지스트리 대신 `settings` 폴더에 저장합니다.
+
+## 1.2 업데이트
+
+- **처음 화면 정리 + 첫 실행 설정 창**: 새로 설치하면 Project View와 Default Timeline 패널만 보이고, 나머지 도구는 창 메뉴에서 켜고 끕니다. 처음 실행할 때 언어, 시작 패널, 메모리, 폴더, 업데이트 확인을 정하는 설정 창이 한 번 나옵니다.
+- **업데이트 알림**: 시작할 때 GitHub 최신 릴리스를 확인해 새 버전이면 알려 줍니다. "나중에"를 누르면 다음 버전이 나올 때까지 묻지 않습니다. 도움말 › 업데이트 확인.
+- **비교 모드 개편**: 뷰어 위 비교 바에서 A / B를 목록으로 고르고 바꾸기, 좌우·위아래·와이프·겹쳐 보기, 시간 / 프레임 동기화, **B 오프셋**(타이밍 맞추기), 주석 대상과 소리 선택.
+- **내보내기 창 개편**: 프리셋 목록 · 비디오 / 오디오 / 오버레이 탭 · 미리보기와 요약(예상 파일 크기) · 파일 이름과 위치.
+- **메모리 최적화**: 캐시 기본값 RAM 25 %(최대 8 GB), 시스템 메모리가 부족하면 자동으로 줄이는 적응형 캐시, 최소화 / 백그라운드에서 메모리 반납, 쉬는 디코더의 버퍼 반납.
+- **타임라인**: 영상과 연결된 소리가 항상 함께 움직이도록 수정(잠긴 트랙의 짝이 있으면 둘 다 고정).
+- **CHARONOS Lite** (Windows / Android) 추가. 빌드 방법: [docs/BUILD-ANDROID.md](docs/BUILD-ANDROID.md).
+- 회귀 검사 77개(1.2 신규 5개).
 
 ## 1.1 업데이트
 

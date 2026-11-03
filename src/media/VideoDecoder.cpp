@@ -202,6 +202,45 @@ bool VideoDecoder::openCodec(bool hardware, QString* error)
     return true;
 }
 
+void VideoDecoder::releaseIdleResources()
+{
+    if (!m_dec || m_released) return;
+    m_releasedHw = m_hwActive;
+    if (m_sws) {
+        sws_freeContext(m_sws);
+        m_sws = nullptr;
+    }
+    if (m_swsYuv) {
+        sws_freeContext(m_swsYuv);
+        m_swsYuv = nullptr;
+    }
+    av_frame_unref(m_frame);
+    av_frame_unref(m_swFrame);
+    avcodec_free_context(&m_dec);
+    if (m_hwCounted) --g_hwSessions;  // another file may use the GPU session meanwhile
+    m_hwCounted = false;
+    m_hwActive = false;
+    m_lastIndex = -1;
+    m_frameValid = false;
+    m_drained = false;
+    m_transferred = false;
+    m_released = true;
+}
+
+bool VideoDecoder::reopenAfterRelease(QString* error)
+{
+    m_released = false;
+    if (m_releasedHw && g_hwEnabled && reserveHardwareSession()) {
+        m_hwCounted = true;
+        if (openCodec(true, nullptr)) return true;
+        --g_hwSessions;
+        m_hwCounted = false;
+    }
+    if (openCodec(false, error)) return true;
+    m_released = true;  // try again on the next request
+    return false;
+}
+
 bool VideoDecoder::probeHardware()
 {
     // libavcodec quietly continues in software when NVDEC rejects the stream, and then
@@ -237,6 +276,7 @@ void VideoDecoder::updateDecoderName()
 bool VideoDecoder::open(const QString& path, QString* error)
 {
     close();
+    m_released = false;
     auto fail = [&](const QString& msg) {
         if (error) *error = msg;
         close();
@@ -395,6 +435,7 @@ bool VideoDecoder::position(int64_t index, QString* error, const FrameSink* sink
         return false;
     }
     if (m_frameValid && m_lastIndex == index) return true;
+    if (m_released && !reopenAfterRelease(error)) return false;
 
     for (int pass = 0; pass < 2; ++pass) {
         if (!m_dec) break;

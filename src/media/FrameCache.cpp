@@ -16,7 +16,39 @@ void FrameCache::setBudget(qint64 bytes)
 qint64 FrameCache::budget() const
 {
     std::lock_guard lock(m_mutex);
+    return limitLocked();
+}
+
+qint64 FrameCache::configuredBudget() const
+{
+    std::lock_guard lock(m_mutex);
     return m_budget;
+}
+
+void FrameCache::setPressureLimit(qint64 bytes)
+{
+    std::lock_guard lock(m_mutex);
+    m_pressure = bytes > 0 ? std::max<qint64>(bytes, qint64(64) << 20) : 0;
+    evictLocked();
+}
+
+qint64 FrameCache::pressureLimit() const
+{
+    std::lock_guard lock(m_mutex);
+    return m_pressure;
+}
+
+void FrameCache::trimTo(qint64 bytes)
+{
+    std::lock_guard lock(m_mutex);
+    while (m_used > bytes && !m_lru.empty()) {
+        const int64_t victim = m_lru.back();
+        m_lru.pop_back();
+        auto it = m_map.find(victim);
+        m_used -= sizeOf(it->second.frame);
+        m_map.erase(it);
+        ++m_revision;
+    }
 }
 
 qint64 FrameCache::usedBytes() const
@@ -28,7 +60,7 @@ qint64 FrameCache::usedBytes() const
 bool FrameCache::hasRoomFor(qint64 bytes) const
 {
     std::lock_guard lock(m_mutex);
-    return m_used + bytes <= m_budget;
+    return m_used + bytes <= limitLocked();
 }
 
 FrameCache::Ptr FrameCache::get(int64_t index)
@@ -60,6 +92,7 @@ void FrameCache::insert(int64_t index, Ptr frame)
         m_used += sizeOf(frame);
         m_map.emplace(index, Entry{ std::move(frame), m_lru.begin() });
     }
+    ++m_revision;
     evictLocked();
 }
 
@@ -69,6 +102,7 @@ void FrameCache::clear()
     m_map.clear();
     m_lru.clear();
     m_used = 0;
+    ++m_revision;
 }
 
 void FrameCache::removeRange(int64_t base, int64_t count)
@@ -79,6 +113,7 @@ void FrameCache::removeRange(int64_t base, int64_t count)
             m_used -= sizeOf(it->second.frame);
             m_lru.erase(it->second.pos);
             it = m_map.erase(it);
+            ++m_revision;
         } else {
             ++it;
         }
@@ -99,11 +134,13 @@ QBitArray FrameCache::mask(int64_t base, int64_t frameCount) const
 void FrameCache::evictLocked()
 {
     // Never evict the most recently inserted frame, even if it alone exceeds the budget.
-    while (m_used > m_budget && m_lru.size() > 1) {
+    const qint64 limit = limitLocked();
+    while (m_used > limit && m_lru.size() > 1) {
         const int64_t victim = m_lru.back();
         m_lru.pop_back();
         auto it = m_map.find(victim);
         m_used -= sizeOf(it->second.frame);
         m_map.erase(it);
+        ++m_revision;
     }
 }
