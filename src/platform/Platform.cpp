@@ -180,28 +180,4 @@ bool openExternal(const QString& urlOrPath)
     return QDesktopServices::openUrl(url);
 }
 
-bool startYtDlpDownload(const QString& url, const QString& folder, const QString& token, QString* error)
-{
-#ifdef Q_OS_ANDROID
-    QJniObject activity = QNativeInterface::QAndroidApplication::context();
-    const jint result = QJniObject::callStaticMethod<jint>(kHelper, "startYtDlpDownload",
-        "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I",
-        activity.object(), QJniObject::fromString(url).object<jstring>(),
-        QJniObject::fromString(folder).object<jstring>(), QJniObject::fromString(token).object<jstring>());
-    if (result == 0) return true;
-    if (error) {
-        if (result == 1) *error = QStringLiteral("Install Termux from F-Droid to enable video downloads on Android.");
-        else if (result == 2) *error = QStringLiteral("Grant CHARONOS the Termux Run Commands permission in Android Settings.");
-        else *error = QStringLiteral("Termux could not start the downloader. Enable allow-external-apps in Termux settings.");
-    }
-    return false;
-#else
-    Q_UNUSED(url);
-    Q_UNUSED(folder);
-    Q_UNUSED(token);
-    if (error) *error = QStringLiteral("Termux is only available on Android.");
-    return false;
-#endif
-}
-
 } // namespace Platform

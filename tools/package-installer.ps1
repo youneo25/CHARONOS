@@ -34,9 +34,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Qt deployment failed.' }
 foreach ($taskDll in @('Qt6Core.dll','Qt6Network.dll')) {
     if (!(Test-Path -LiteralPath (Join-Path $taskPackage $taskDll))) { throw "$taskDll was not deployed (needed by charonos-mcp.exe)." }
 }
-foreach ($taskDll in @('avcodec-62.dll','avformat-62.dll','avutil-60.dll','swscale-9.dll','swresample-6.dll')) {
+foreach ($taskDll in @('avcodec-62.dll','avdevice-62.dll','avfilter-11.dll','avformat-62.dll','avutil-60.dll','swscale-9.dll','swresample-6.dll')) {
     Copy-Item -LiteralPath (Join-Path 'C:\dev\ffmpeg\bin' $taskDll) -Destination $taskPackage
 }
+Copy-Item -LiteralPath 'C:\dev\ffmpeg\bin\ffmpeg.exe' -Destination $taskPackage
 foreach ($taskDll in @('dxcompiler.dll','dxil.dll')) {
     if (Test-Path -LiteralPath (Join-Path $taskBuild $taskDll)) { Copy-Item -LiteralPath (Join-Path $taskBuild $taskDll) -Destination $taskPackage }
 }

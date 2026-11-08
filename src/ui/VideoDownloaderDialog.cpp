@@ -6,6 +6,8 @@
 #include <QDir>
 #include <QApplication>
 #include <QClipboard>
+#include <QComboBox>
+#include <QCoreApplication>
 #include <QFileDialog>
 #include <QFile>
 #include <QFileInfo>
@@ -76,6 +78,29 @@ VideoDownloaderDialog::VideoDownloaderDialog(QWidget* parent)
     urlLayout->addRow(L("Video link", "영상 링크"), m_url);
     auto* urlSection = section(L("Video", "비디오"), urlBody);
 
+    m_format = new QComboBox;
+    m_format->addItem(L("Video with audio (best quality)", "비디오 + 오디오 (최고 화질)"), "video-audio");
+    m_format->addItem(L("Video only", "비디오만"), "video-only");
+    m_format->addItem(L("Audio only", "오디오만"), "audio-only");
+    m_cookies = new QLineEdit;
+    m_cookies->setPlaceholderText(L("Cookies.txt (optional; helps with login restricted videos)", "Cookies.txt (선택 사항, 로그인 제한 영상용)"));
+    auto* cookiesBrowse = new QPushButton(L("Browse...", "찾아보기..."));
+    connect(cookiesBrowse, &QPushButton::clicked, this, [this] {
+        const QString path = QFileDialog::getOpenFileName(this, L("Choose cookies file", "쿠키 파일 선택"), {}, "Cookies (*.txt);;All files (*)");
+        if (!path.isEmpty()) m_cookies->setText(QDir::toNativeSeparators(path));
+    });
+    auto* cookiesRow = new QWidget;
+    auto* cookiesLayout = new QHBoxLayout(cookiesRow);
+    cookiesLayout->setContentsMargins(0, 0, 0, 0);
+    cookiesLayout->addWidget(m_cookies, 1);
+    cookiesLayout->addWidget(cookiesBrowse);
+    auto* optionsBody = new QWidget;
+    auto* optionsLayout = new QFormLayout(optionsBody);
+    optionsLayout->setContentsMargins(0, 0, 0, 0);
+    optionsLayout->addRow(L("Download type", "다운로드 종류"), m_format);
+    optionsLayout->addRow(L("Cookies (optional; useful for bilibili login)", "쿠키 (선택 사항, 빌리빌리 로그인에 유용)"), cookiesRow);
+    auto* optionsSection = section(L("Options", "옵션"), optionsBody);
+
     m_folder = new QLineEdit;
     QString folder = QSettings().value("videoDownloader/dir").toString();
     if (folder.isEmpty()) folder = QDir(QStandardPaths::writableLocation(QStandardPaths::MoviesLocation)).filePath("CHARONOS Downloads");
@@ -114,8 +139,8 @@ VideoDownloaderDialog::VideoDownloaderDialog(QWidget* parent)
     connect(m_cancel, &QPushButton::clicked, this, &VideoDownloaderDialog::cancelOrClose);
     connect(m_download, &QPushButton::clicked, this, &VideoDownloaderDialog::ensureDownloaderAndStart);
     connect(&m_androidPoll, &QTimer::timeout, this, &VideoDownloaderDialog::pollAndroidDownload);
-    connect(&m_process, &QProcess::readyReadStandardOutput, this, [this] { appendOutput(QString::fromLocal8Bit(m_process.readAllStandardOutput())); });
-    connect(&m_process, &QProcess::readyReadStandardError, this, [this] { appendOutput(QString::fromLocal8Bit(m_process.readAllStandardError())); });
+    connect(&m_process, &QProcess::readyReadStandardOutput, this, [this] { appendOutput(QString::fromUtf8(m_process.readAllStandardOutput())); });
+    connect(&m_process, &QProcess::readyReadStandardError, this, [this] { appendOutput(QString::fromUtf8(m_process.readAllStandardError())); });
     connect(&m_process, &QProcess::finished, this, [this](int code, QProcess::ExitStatus exitStatus) {
         const bool install = m_installing;
         m_installing = false;
@@ -131,19 +156,44 @@ VideoDownloaderDialog::VideoDownloaderDialog(QWidget* parent)
             return;
         }
 
+        if (m_updating) {
+            m_updating = false;
+            if (exitStatus == QProcess::NormalExit && code == 0) {
+                m_retriedAfterUpdate = true;
+                m_log->appendPlainText(L("Updated yt-dlp. Retrying the download.", "yt-dlp를 업데이트했습니다. 다운로드를 다시 시도합니다."));
+                startDownload(true);
+            } else {
+                setBusy(false);
+                m_status->setText(L("Could not update yt-dlp. Update it manually and retry.", "yt-dlp를 업데이트하지 못했습니다. 직접 업데이트한 뒤 다시 시도하세요."));
+            }
+            return;
+        }
+
         setBusy(false);
-        const QStringList lines = QString::fromLocal8Bit(m_process.readAllStandardOutput()).split(QRegularExpression("[\\r\\n]+"), Qt::SkipEmptyParts);
-        for (const QString& line : lines) {
+        appendOutput(QString::fromUtf8(m_process.readAllStandardOutput()));
+        appendOutput(QString::fromUtf8(m_process.readAllStandardError()));
+        if (!m_consoleBuffer.isEmpty()) {
+            const QString line = QString::fromUtf8(m_consoleBuffer).trimmed();
+            m_consoleBuffer.clear();
             if (line.startsWith("CHARONOS_FILE:")) m_outputFile = line.mid(QStringLiteral("CHARONOS_FILE:").size()).trimmed();
-            else appendOutput(line);
+            else if (!line.isEmpty()) m_log->appendPlainText(line);
         }
         if (exitStatus == QProcess::NormalExit && code == 0 && QFileInfo::exists(m_outputFile)) {
             m_status->setText(L("Download complete. Adding to Sources…", "다운로드 완료. Sources에 추가하는 중…"));
             m_progress->setValue(100);
             emit downloaded(m_outputFile);
-            m_status->setText(L("Added to Sources: %1", "Sources에 추가됨: %1").arg(QFileInfo(m_outputFile).fileName()));
         } else {
-            m_status->setText(L("Download failed. Check the message above.", "다운로드에 실패했습니다. 위 메시지를 확인하세요."));
+            if (!m_retriedAfterUpdate && QString::fromUtf8(m_processOutput).contains("Requested format is not available", Qt::CaseInsensitive) &&
+                QFileInfo(downloaderPath()).canonicalFilePath() ==
+                    QFileInfo(QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath("tools/yt-dlp.exe")).canonicalFilePath()) {
+                updateAndRetry();
+                return;
+            }
+            const bool formatsUnavailable = QString::fromUtf8(m_processOutput).contains("Requested format is not available", Qt::CaseInsensitive);
+            m_status->setText(formatsUnavailable
+                ? L("yt-dlp could not find a usable format. Update yt-dlp and check that the link is accessible.",
+                    "yt-dlp가 사용할 수 있는 포맷을 찾지 못했습니다. yt-dlp를 업데이트하고 링크에 접근할 수 있는지 확인하세요.")
+                : L("Download failed. Check the message above.", "다운로드에 실패했습니다. 위 메시지를 확인하세요."));
         }
     });
 
@@ -156,10 +206,11 @@ VideoDownloaderDialog::VideoDownloaderDialog(QWidget* parent)
     layout->setSpacing(14);
     layout->addWidget(intro);
     layout->addWidget(urlSection);
+    layout->addWidget(optionsSection);
     layout->addWidget(destSection);
     layout->addWidget(section(L("Progress", "진행 상황"), progressBody), 1);
     layout->addLayout(buttons);
-    resize(720, 490);
+    resize(720, 570);
 }
 
 QString VideoDownloaderDialog::downloaderPath() const
@@ -189,6 +240,7 @@ void VideoDownloaderDialog::ensureDownloaderAndStart()
         return;
     }
     QSettings().setValue("videoDownloader/dir", QDir::fromNativeSeparators(m_folder->text().trimmed()));
+    m_retriedAfterUpdate = false;
 #ifndef Q_OS_ANDROID
     if (!downloaderPath().isEmpty()) {
         startDownload();
@@ -244,12 +296,13 @@ void VideoDownloaderDialog::ensureDownloaderAndStart()
 #endif
 }
 
-void VideoDownloaderDialog::startDownload()
+void VideoDownloaderDialog::startDownload(bool retry)
 {
     m_outputFile.clear();
     m_consoleBuffer.clear();
+    m_processOutput.clear();
     m_progress->setValue(0);
-    m_log->clear();
+    if (!retry) m_log->clear();
     setBusy(true);
     m_status->setText(L("Downloading video…", "영상 다운로드 중…"));
 #ifdef Q_OS_ANDROID
@@ -259,7 +312,8 @@ void VideoDownloaderDialog::startDownload()
     m_androidLogOffset = 0;
     m_androidStarted.start();
     QString error;
-    if (!Platform::startYtDlpDownload(m_url->text().trimmed(), m_folder->text().trimmed(), m_androidToken, &error)) {
+    if (!Platform::startYtDlpDownload(m_url->text().trimmed(), m_folder->text().trimmed(), m_androidToken,
+                                      m_format->currentData().toString(), m_cookies->text().trimmed(), &error)) {
         setBusy(false);
         m_status->setText(L("Android downloader setup is required.", "Android 다운로더 설정이 필요합니다."));
         QMessageBox::information(this, L("Termux setup", "Termux 설정"),
@@ -270,14 +324,24 @@ void VideoDownloaderDialog::startDownload()
     m_androidPoll.start(350);
     return;
 #endif
-    QStringList args{
-        "--newline", "--no-warnings", "--no-playlist",
+    QStringList args{"--ignore-config", "--encoding", "UTF-8", "--newline", "--progress", "--progress-delta", "1", "--no-playlist",
         "--progress-template", "download:CHARONOS_PROGRESS:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
-        "--print", "after_move:CHARONOS_FILE:%(filepath)s",
-        "-f", "best[ext=mp4]/best",
-        "-o", QDir(m_folder->text().trimmed()).filePath("%(title).200B [%(id)s].%(ext)s"),
-        m_url->text().trimmed()
-    };
+        "--print", "after_move:CHARONOS_FILE:%(filepath)s"};
+    const QString format = m_format->currentData().toString();
+    if (format == "video-only") args << "-f" << "bestvideo/best";
+    else if (format == "audio-only") args << "-f" << "bestaudio/best";
+    else args << "-f" << "bv*+ba/best" << "--merge-output-format" << "mp4/mkv";
+    const QString cookies = m_cookies->text().trimmed();
+    if (!cookies.isEmpty()) args << "--cookies" << cookies;
+    args << "-o" << QDir(m_folder->text().trimmed()).filePath("%(title).200B [%(id)s].%(ext)s")
+         << m_url->text().trimmed();
+    const QString appFfmpeg = QDir(QCoreApplication::applicationDirPath()).filePath("ffmpeg.exe");
+    if (QFileInfo::exists(appFfmpeg)) {
+        args << "--ffmpeg-location" << appFfmpeg;
+    } else {
+        const QString systemFfmpeg = QStandardPaths::findExecutable("ffmpeg.exe");
+        if (!systemFfmpeg.isEmpty()) args << "--ffmpeg-location" << systemFfmpeg;
+    }
     m_process.setProgram(downloaderPath());
     m_process.setArguments(args);
     m_process.setWorkingDirectory(m_folder->text().trimmed());
@@ -288,23 +352,57 @@ void VideoDownloaderDialog::startDownload()
     }
 }
 
+void VideoDownloaderDialog::updateAndRetry()
+{
+    m_updating = true;
+    m_log->appendPlainText(L("The selected formats are no longer available. Updating yt-dlp and retrying once.",
+                             "요청한 영상 포맷을 사용할 수 없습니다. yt-dlp를 업데이트한 뒤 한 번 다시 시도합니다."));
+    m_status->setText(L("Updating yt-dlp…", "yt-dlp 업데이트 중…"));
+    setBusy(true);
+    m_process.setProgram(downloaderPath());
+    m_process.setArguments({"-U"});
+    m_process.setWorkingDirectory(m_folder->text().trimmed());
+    m_process.start();
+    if (!m_process.waitForStarted(3000)) {
+        m_updating = false;
+        setBusy(false);
+        m_status->setText(L("Could not update yt-dlp. Update it manually and retry.", "yt-dlp를 업데이트하지 못했습니다. 직접 업데이트한 뒤 다시 시도하세요."));
+    }
+}
+
 void VideoDownloaderDialog::appendOutput(const QString& text)
 {
-    m_consoleBuffer += text.toLocal8Bit();
+    m_processOutput += text.toUtf8();
+    m_consoleBuffer += text.toUtf8();
     while (true) {
         const int end = m_consoleBuffer.indexOf('\n');
         if (end < 0) break;
-        const QString line = QString::fromLocal8Bit(m_consoleBuffer.left(end)).trimmed();
+        const QString line = QString::fromUtf8(m_consoleBuffer.left(end)).trimmed();
         m_consoleBuffer.remove(0, end + 1);
         if (line.startsWith("CHARONOS_PROGRESS:")) updateProgress(line.mid(18));
+        else if (line.contains(QRegularExpression(R"(\[download\]\s+\d+(?:\.\d+)?%)"))) {
+            const auto match = QRegularExpression(R"(\[download\]\s+(\d+(?:\.\d+)?%).*?(?:at\s+([^\s]+))?.*?(?:ETA\s+([^\s]+))?)").match(line);
+            if (match.hasMatch()) updateProgress(match.captured(1) + "|" + match.captured(2) + "|" + match.captured(3));
+            else m_log->appendPlainText(line);
+        }
         else if (!line.isEmpty() && !line.startsWith("CHARONOS_FILE:")) m_log->appendPlainText(line);
         else if (line.startsWith("CHARONOS_FILE:")) m_outputFile = line.mid(QStringLiteral("CHARONOS_FILE:").size()).trimmed();
     }
     const int carriage = m_consoleBuffer.lastIndexOf('\r');
     if (carriage >= 0) {
-        const QString line = QString::fromLocal8Bit(m_consoleBuffer.left(carriage)).trimmed();
+        const QString line = QString::fromUtf8(m_consoleBuffer.left(carriage)).trimmed();
         m_consoleBuffer.remove(0, carriage + 1);
         if (line.startsWith("CHARONOS_PROGRESS:")) updateProgress(line.mid(18));
+    }
+}
+
+void VideoDownloaderDialog::setSourceImportResult(bool added)
+{
+    if (added) {
+        m_status->setText(L("Added to Sources: %1", "Sources에 추가됨: %1").arg(QFileInfo(m_outputFile).fileName()));
+    } else {
+        m_status->setText(L("Downloaded, but could not add the file to Sources. Check the message above.",
+                            "다운로드했지만 Sources에 추가하지 못했습니다. 위 메시지를 확인하세요."));
     }
 }
 
@@ -327,6 +425,8 @@ void VideoDownloaderDialog::setBusy(bool busy)
 {
     m_url->setEnabled(!busy);
     m_folder->setEnabled(!busy);
+    m_format->setEnabled(!busy);
+    m_cookies->setEnabled(!busy);
     m_download->setEnabled(!busy);
     m_cancel->setText(busy ? L("Cancel", "취소") : L("Close", "닫기"));
 }
@@ -392,12 +492,15 @@ void VideoDownloaderDialog::pollAndroidDownload()
         m_status->setText(L("Download complete. Adding to Sources…", "다운로드 완료. Sources에 추가하는 중…"));
         m_progress->setValue(100);
         emit downloaded(m_outputFile);
-        m_status->setText(L("Added to Sources: %1", "Sources에 추가됨: %1").arg(QFileInfo(m_outputFile).fileName()));
         QFile::remove(m_androidStatusPath);
         QFile::remove(m_androidLogPath);
         QFile::remove(QDir(m_folder->text().trimmed()).filePath(".charonos-yt-dlp-" + m_androidToken + ".sh"));
     } else {
-        m_status->setText(L("Download failed. Check the Termux setup and log.", "다운로드에 실패했습니다. Termux 설정과 로그를 확인하세요."));
+        const bool formatUnavailable = m_log->toPlainText().contains("Requested format is not available", Qt::CaseInsensitive);
+        m_status->setText(formatUnavailable
+            ? L("Update yt-dlp in Termux with `python -m pip install -U yt-dlp`, then retry.",
+                "Termux에서 `python -m pip install -U yt-dlp`로 yt-dlp를 업데이트한 뒤 다시 시도하세요.")
+            : L("Download failed. Check the Termux setup and log.", "다운로드에 실패했습니다. Termux 설정과 로그를 확인하세요."));
     }
 #endif
 }

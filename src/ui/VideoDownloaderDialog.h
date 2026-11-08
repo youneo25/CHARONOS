@@ -7,6 +7,7 @@
 
 class QLabel;
 class QLineEdit;
+class QComboBox;
 class QNetworkAccessManager;
 class QProgressBar;
 class QPlainTextEdit;
@@ -19,6 +20,7 @@ public:
 
 public slots:
     void reject() override;
+    void setSourceImportResult(bool added);
 
 signals:
     void downloaded(const QString& filePath);
@@ -26,7 +28,8 @@ signals:
 private:
     QString downloaderPath() const;
     void ensureDownloaderAndStart();
-    void startDownload();
+    void startDownload(bool retry = false);
+    void updateAndRetry();
     void appendOutput(const QString& text);
     void updateProgress(const QString& text);
     void setBusy(bool busy);
@@ -36,6 +39,8 @@ private:
 
     QLineEdit* m_url = nullptr;
     QLineEdit* m_folder = nullptr;
+    QLineEdit* m_cookies = nullptr;
+    QComboBox* m_format = nullptr;
     QLabel* m_status = nullptr;
     QProgressBar* m_progress = nullptr;
     QPlainTextEdit* m_log = nullptr;
@@ -47,6 +52,9 @@ private:
     QString m_pendingUrl;
     QString m_pendingFolder;
     bool m_installing = false;
+    bool m_updating = false;
+    bool m_retriedAfterUpdate = false;
+    QByteArray m_processOutput;
     QByteArray m_consoleBuffer;
     QTimer m_androidPoll;
     QString m_androidStatusPath;

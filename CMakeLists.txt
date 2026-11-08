@@ -67,7 +67,6 @@ set(APP_SOURCES
   src/ui/ConsoleDock.h src/ui/ConsoleDock.cpp
   src/ui/HotkeyManager.h src/ui/HotkeyManager.cpp
   src/ui/ExportDialog.h           src/ui/ExportDialog.cpp
-  src/ui/VideoDownloaderDialog.h  src/ui/VideoDownloaderDialog.cpp
   src/ui/FrameExportDialog.h      src/ui/FrameExportDialog.cpp
   src/ui/SetupWizard.h            src/ui/SetupWizard.cpp
   src/ui/CompareBar.h             src/ui/CompareBar.cpp
@@ -95,7 +94,8 @@ set(APP_SOURCES
   src/ui/Style.h                  src/ui/Style.cpp
 )
 if(NOT CHARONOS_LITE)
-  list(APPEND APP_SOURCES src/ui/MainWindowAi.cpp src/ai/McpServer.h src/ai/McpServer.cpp)
+  list(APPEND APP_SOURCES src/ui/MainWindowAi.cpp src/ai/McpServer.h src/ai/McpServer.cpp
+       src/ui/VideoDownloaderDialog.h src/ui/VideoDownloaderDialog.cpp)
 endif()
 if(ANDROID)
   list(APPEND APP_SOURCES src/media/AudioEngineAndroid.cpp)

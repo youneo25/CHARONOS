@@ -34,9 +34,10 @@ function Stage-Edition([string]$name, [string]$build, [string]$exe, [bool]$lite)
     if (!$lite) { Copy-Item -LiteralPath (Join-Path $buildDir 'charonos-mcp.exe') -Destination $stage }
     & (Join-Path $Qt 'bin\windeployqt.exe') --release --no-translations --no-compiler-runtime --no-system-d3d-compiler --no-opengl-sw (Join-Path $stage $exe) | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Qt deployment failed for $exe." }
-    foreach ($dll in @('avcodec-62.dll','avformat-62.dll','avutil-60.dll','swscale-9.dll','swresample-6.dll')) {
+    foreach ($dll in @('avcodec-62.dll','avdevice-62.dll','avfilter-11.dll','avformat-62.dll','avutil-60.dll','swscale-9.dll','swresample-6.dll')) {
         Copy-Item -LiteralPath (Join-Path $FFmpeg ('bin\' + $dll)) -Destination $stage
     }
+    Copy-Item -LiteralPath (Join-Path $FFmpeg 'bin\ffmpeg.exe') -Destination $stage
     $crt = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC' -Directory |
         Where-Object Name -Match '^\d+\.' | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
     Get-ChildItem (Join-Path $crt.FullName 'x64\Microsoft.VC143.CRT') -Filter '*.dll' | Copy-Item -Destination $stage

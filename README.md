@@ -20,9 +20,9 @@ Get the Windows installers, portable archives, and Android APK from the [latest 
 
 ## Video downloader
 
-Choose **File → Video Downloader** and paste a supported link, including YouTube and bilibili. Pick a destination and start the download. CHARONOS adds the completed video to **Sources** without inserting it into the timeline.
+The video downloader is available in the Windows Full edition. Choose **File → Video Downloader** and paste a link supported by yt-dlp, including YouTube and bilibili. Pick a destination and start the download. CHARONOS adds the completed video to **Sources** without inserting it into the timeline. The dialog supports video with audio, video-only, audio-only, and an optional cookies file for login-restricted content.
 
-On Windows, CHARONOS prepares the official yt-dlp executable on first use. On Android, downloads run through Termux: install Python and yt-dlp in Termux, allow external commands, grant CHARONOS the Termux Run Commands permission, and allow Termux to access shared storage. See the Android build guide for setup notes.
+The Lite edition, including the Android APK, does not include video downloading.
 
 ## Core features
 

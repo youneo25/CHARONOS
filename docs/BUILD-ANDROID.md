@@ -37,6 +37,4 @@ cmake --build build-android --target apk
 
 The build output is an unsigned release APK. Align and sign it with `zipalign` and `apksigner` using the release keystore for this app. Keep using the same signing key for updates so Android can install them over an existing copy.
 
-## Android video downloads
-
-Video downloads use yt-dlp through Termux. Install Termux from its official distribution, then set up Python, yt-dlp, and shared storage in Termux. Enable `allow-external-apps` in `~/.termux/termux.properties`, restart Termux, and grant CHARONOS the Termux **Run Commands** permission in Android settings. Termux also needs access to shared storage. The downloader UI reports when this setup is missing.
+The Android APK is the Lite edition and does not include video downloading.
