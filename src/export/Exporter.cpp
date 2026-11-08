@@ -22,7 +22,7 @@ QRectF stillFrameBounds(QSize media, const Source& source, int frame, const Stil
     QRectF bounds(QPointF(0, 0), QSizeF(media));
     if (!o.includeOutside) return bounds;
     if (o.notes)
-        for (const auto& e : source.renderable(frame)) {
+        for (const auto& e : source.renderable(frame, o.explicitNotesOnly)) {
             const Annotation a = source.evaluated(*e.annotation, frame);
             // Selection boxes alone do not include thick pens or arrowheads.
             const double bleed = std::max(2.0, a.size * std::max({1.0, std::abs(a.stretchX), std::abs(a.stretchY)}) * (a.type == "arrow" ? 4 : 1));
@@ -56,7 +56,7 @@ QImage composeStillFrame(const QImage& frame, const Source& source, int localFra
     p.translate(-bounds.topLeft());
     if (o.video) p.drawImage(QPointF(0, 0), frame);
     if (o.notes)
-        for (const auto& e : source.renderable(localFrame))
+        for (const auto& e : source.renderable(localFrame, o.explicitNotesOnly))
             AnnotationPainter::paint(p, source.evaluated(*e.annotation, localFrame), frame.size(), 1, false);
     if (o.tracks) {
         TrackPainter::Style style; style.range = o.trackRange;
@@ -73,7 +73,7 @@ QImage composeStillFrame(const QImage& frame, const Source& source, int localFra
 }
 
 QImage composeFrame(const QImage& frame, const Source& source, int localFrame, QSize outSize, bool withNotes,
-                    const QString& caption, bool withTracks, int trackRange, double margin)
+                    const QString& caption, bool withTracks, int trackRange, double margin, bool explicitNotesOnly)
 {
     QImage canvas(outSize, QImage::Format_RGB32);
     canvas.fill(Qt::black);
@@ -91,7 +91,7 @@ QImage composeFrame(const QImage& frame, const Source& source, int localFrame, Q
         p.save();
         p.translate(r.topLeft());
         p.scale(s, s);
-        for (const Source::Entry& e : source.renderable(localFrame))
+        for (const Source::Entry& e : source.renderable(localFrame, explicitNotesOnly))
             AnnotationPainter::paint(p, source.evaluated(*e.annotation, localFrame), src, 1.0, false);
         p.restore();
     }
@@ -247,7 +247,7 @@ bool runTimelineExport(const ExportJob& job, std::atomic<int64_t>& done, const s
             p.translate(primary->rect.topLeft());
             p.scale(primary->rect.width() / primarySize.width(), primary->rect.height() / primarySize.height());
             if (job.notes)
-                for (const Source::Entry& e : src.renderable(int(primary->local))) {
+                for (const Source::Entry& e : src.renderable(int(primary->local), job.explicitNotesOnly)) {
                     if (hidden != job.hiddenNotes.end() && hidden->second.contains(e.annotation->id)) continue;
                     AnnotationPainter::paint(p, src.evaluated(*e.annotation, int(primary->local)), primarySize, 1.0, false);
                 }
@@ -471,10 +471,10 @@ bool runExport(const ExportJob& job, std::atomic<int64_t>& done, const std::atom
             const QRectF ar = fit(QSizeF(frame.size()), aBox);
             p.drawImage(ar.topLeft(), composeFrame(frame, *src, int(rawLocal), ar.size().toSize(), job.notes,
                                                    separate || !job.caption ? aCap : aCap + QStringLiteral("    |    ") + bCap,
-                                                   job.tracks, job.trackRange, job.margin));
+                                                   job.tracks, job.trackRange, job.margin, job.explicitNotesOnly));
             const QRectF br = fit(QSizeF(bFrame.size()), bBox);
             const QImage bImg = composeFrame(bFrame, *bSrc, int(bLocal), br.size().toSize(), job.notes, separate ? bCap : QString(),
-                                             job.tracks, job.trackRange, job.margin);
+                                             job.tracks, job.trackRange, job.margin, job.explicitNotesOnly);
             if (cmp.layout == Layout::Wipe) {
                 const double x = aBox.left() + aBox.width() * cmp.wipe;
                 p.save();
@@ -488,7 +488,8 @@ bool runExport(const ExportJob& job, std::atomic<int64_t>& done, const std::atom
                 p.drawImage(br.topLeft(), bImg);
             }
         } else {
-            out = composeFrame(frame, *src, int(rawLocal), outSize, job.notes, caption, job.tracks, job.trackRange, job.margin);
+            out = composeFrame(frame, *src, int(rawLocal), outSize, job.notes, caption, job.tracks, job.trackRange,
+                               job.margin, job.explicitNotesOnly);
         }
 
         if (job.isSequence()) {

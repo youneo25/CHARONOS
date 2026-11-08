@@ -77,6 +77,8 @@ const QHash<QString, QString>& shapes()
         { "sort", R"(<path d="M7 5v14M4 16l3 3 3-3"/><path d="M13.5 6h6M13.5 10.5h4.5M13.5 15h3"/>)" },
         { "export", R"(<path d="M12 15V4M7.5 8.5L12 4l4.5 4.5"/><path d="M5 13.5v4.5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4.5"/>)" },
         { "fit", R"(<path d="M4.5 9V4.5H9M15 4.5h4.5V9M19.5 15v4.5H15M9 19.5H4.5V15"/>)" },
+        { "fullscreen", R"(<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/>)" },
+        { "pin", R"(<path d="M8 3.5h8l-1 5 3 3v2h-5v6.5l-1 1-1-1V13.5H6v-2l3-3z"/>)" },
         { "bookmark", R"(<path d="M7 4.5a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v15.5l-5-3.8-5 3.8z"/>)" },
         { "grid", R"(<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9.2 4.5v15M14.8 4.5v15M3.5 9.5h17M3.5 14.5h17"/>)" },
         { "eye", R"(<path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.7"/>)" },

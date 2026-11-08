@@ -18,10 +18,12 @@
 // Draws a decoded frame fitted into `outSize`, optionally with the clip's annotations
 // burned in and a small caption in the lower-left corner.
 QImage composeFrame(const QImage& frame, const Source& source, int localFrame, QSize outSize, bool withNotes,
-                    const QString& caption, bool withTracks = false, int trackRange = 0, double margin = 0);
+                    const QString& caption, bool withTracks = false, int trackRange = 0, double margin = 0,
+                    bool explicitNotesOnly = false);
 
 struct StillFrameOptions {
     bool includeOutside = true, notes = true, tracks = true, video = true;
+    bool explicitNotesOnly = false;
     double scale = 1.0;
     int padding = 16, trackRange = 0;
     QColor background = Qt::black;
@@ -43,6 +45,7 @@ struct ExportJob {
     double scale = 1.0;
     double margin = 0.0; // fractional border on every edge, includes off-video annotations
     bool notes = true;
+    bool explicitNotesOnly = false;
     bool caption = false;
     bool tracks = false;
     int trackRange = 0;

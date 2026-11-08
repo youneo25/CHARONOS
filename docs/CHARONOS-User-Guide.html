@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CHARONOS 1.2.1 User Guide</title>
+<title>CHARONOS 1.2.2 User Guide</title>
 <style>
 :root {
   --bg: #1b1b1a; --panel: #242422; --raised: #2e2e2b; --border: #3a3936; --text: #e5e3db; --strong: #faf9f5;
@@ -70,9 +70,11 @@ td:first-child { white-space: nowrap; }
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; max-width: 980px; }
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; }
 .card h4 { margin: 2px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent); }
-.card table { margin: 0; font-size: 13.5px; }
-.card td { padding: 4px 0; border: 0; }
-.card td:last-child { text-align: right; }
+.card table { margin: 0; width: 100%; table-layout: fixed; font-size: 13.5px; }
+.card td { padding: 4px 0; border: 0; vertical-align: top; }
+.card td:first-child { width: 54%; white-space: normal; overflow-wrap: anywhere; padding-right: 8px; }
+.card td:last-child { width: 46%; text-align: left; white-space: normal; }
+.card td:last-child kbd { white-space: nowrap; }
 .diagram { font-family: "Cascadia Mono", Consolas, monospace; font-size: 12.5px; line-height: 1.35; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; overflow-x: auto; color: var(--dim); white-space: pre; }
 .steps { counter-reset: step; list-style: none; padding-left: 0; }
 .steps li { counter-increment: step; position: relative; padding-left: 36px; margin: 9px 0; }
@@ -93,7 +95,7 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
 <div class="layout">
 <nav class="toc" aria-label="Contents">
   <div class="brand">CHARONOS</div>
-  <div class="ver">User Guide · version 1.2.1</div>
+  <div class="ver">User Guide · version 1.2.2</div>
   <input id="search" type="search" placeholder="Search the guide…" aria-label="Search the guide">
   <ol id="toc">
     <li><a href="#start">Getting started</a></li>
@@ -124,7 +126,7 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
 
 <main>
 <header class="hero">
-  <h1>CHARONOS 1.2.1 User Guide</h1>
+  <h1>CHARONOS 1.2.2 User Guide</h1>
   <p>CHARONOS is a frame-accurate reference and review tool for animators. Load video or image sequences, inspect timing frame by frame, draw annotations, compare takes, track motion, work on a multi-track timeline, and export review clips.</p>
   <div class="pills"><span class="pill">Windows 10 / 11 · x64</span><span class="pill">Frame-exact decoding</span><span class="pill">Multi-track timeline</span><span class="pill">Silhouette analysis</span><span class="pill">NVDEC + GPU colour conversion</span><span class="pill">Built-in MCP server</span></div>
 </header>
@@ -132,17 +134,17 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
 <section id="start">
 <h2><span class="n">1</span>Getting started</h2>
 <h3>Install</h3>
-<p>Run <code>CHARONOS-1.2.1-Setup-x64.exe</code>. No administrator rights are needed; the default location is <code>%LOCALAPPDATA%\Programs\CHARONOS</code>. Qt, FFmpeg and the Microsoft C++ runtime are included. Uninstall from Windows Settings › Apps or with <code>unins000.exe</code> in the install folder — your projects are never removed.</p>
+<p>Run <code>CHARONOS-1.2.2-Setup-x64.exe</code>. No administrator rights are needed; the default location is <code>%LOCALAPPDATA%\Programs\CHARONOS</code>. Qt, FFmpeg and the Microsoft C++ runtime are included. Uninstall from Windows Settings › Apps or with <code>unins000.exe</code> in the install folder — your projects are never removed.</p>
 <h3>Your first review in one minute</h3>
 <ol class="steps">
   <li>Drag a video, an image sequence (drop any one frame) or a whole folder onto the window, or use <b>File › Import Media</b> <kbd>Ctrl</kbd>+<kbd>I</kbd>.</li>
   <li>Press <kbd>Space</kbd> to play. Step with <kbd>←</kbd> / <kbd>→</kbd>; hold <kbd>Alt</kbd> and drag anywhere on the picture to scrub.</li>
-  <li>Pick the pencil <kbd>P</kbd> and draw on the frame. A drawing holds until the next drawing key.</li>
+  <li>Pick the pencil <kbd>P</kbd> and draw on the frame. Normally a drawing holds until the next drawing key; <b>Edit › Settings › Drawing Mode</b> makes it visible only on the frame where it was drawn.</li>
   <li>Press <kbd>K</kbd> to bookmark key poses, then <kbd>Ctrl</kbd>+<kbd>Space</kbd> to play only those poses.</li>
   <li>Save the project with <kbd>Ctrl</kbd>+<kbd>S</kbd> (<code>.frvm</code>). Your media is referenced, not copied.</li>
 </ol>
-<div class="callout tip"><b>Tip.</b> Press <kbd>F1</kbd> at any time for the shortcut sheet. It always shows your current keys, including the ones you changed in <b>Tools › HotKey Manager</b>.</div>
-<p>The interface language defaults to English. To switch to Korean, choose <b>Tools › Language / 언어</b> and restart the app.</p>
+<div class="callout tip"><b>Tip.</b> Press <kbd>F1</kbd> at any time for the shortcut sheet. It always shows your current keys, including the ones you changed in <b>Edit › Settings › HotKey Manager</b>.</div>
+<p>The interface language defaults to English. To switch to Korean, choose <b>Edit › Settings › Language / 언어</b> and restart the app. The first-run guide also has an <b>Open User Guide (HTML)</b> button; it opens this document in either interface language.</p>
 </section>
 
 <section id="interface">
@@ -181,7 +183,7 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
 <h3>Importing</h3>
 <p>Drop files or folders on the window, the Project View, the Sources list or the Timeline panel. <b>Import Folder</b> <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> brings in a folder tree and keeps its folders in the Project View. New sources are added to the end of the timeline.</p>
 <h3>Video downloader</h3>
-<p>In the Windows Full edition, choose <b>File › Video Downloader</b>, paste a link supported by yt-dlp (including YouTube and bilibili), choose a destination, then click <b>Download</b>. Select video with audio, video-only, or audio-only. A cookies file can be provided for login-restricted content. Completed videos are added to <b>Sources</b> without being inserted on the timeline. Lite editions, including the Android APK, do not include video downloading.</p>
+<p>In the Windows Full edition, choose <b>File › Video Downloader</b> and paste a link supported by yt-dlp (including YouTube and bilibili). CHARONOS inspects the link and displays a thumbnail, dimensions, aspect ratio, frame rate and duration. After analysis, select a maximum download resolution or choose <b>Native</b> to use the source height. Choose video with audio, video-only or audio-only; a cookies file is optional for login-restricted content. Select a destination and click <b>Download</b>. Completed videos are added to <b>Sources</b> without being inserted on the timeline. Lite editions, including the Android APK, do not include video downloading.</p>
 <h3>Projects</h3>
 <p>A project (<code>.frvm</code>, JSON) stores your sources, timeline and trims, drawings, bookmarks, frame notes, tracks and settings. Media paths are saved absolute and relative to the project, so a project folder can be moved together with its media. If a file is missing when you open a project, CHARONOS asks you to locate it.</p>
 </section>
@@ -195,7 +197,7 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
 <tr><td>Step one frame</td><td><kbd>←</kbd> / <kbd>→</kbd>; ten frames with <kbd>Shift</kbd>.</td></tr>
 <tr><td>First / last frame</td><td><kbd>Home</kbd> / <kbd>End</kbd></td></tr>
 <tr><td>Previous / next clip</td><td><kbd>↑</kbd> / <kbd>↓</kbd></td></tr>
-<tr><td>Scrub</td><td><kbd>Alt</kbd>+drag anywhere (add <kbd>Shift</kbd> for fine control), or drag on the clip bar, scrub bar or timeline ruler. With <i>Endless Scrubbing</i> on (Tools menu) the pointer wraps at the screen edge.</td></tr>
+<tr><td>Scrub</td><td><kbd>Alt</kbd>+drag anywhere (add <kbd>Shift</kbd> for fine control), or drag on the clip bar, scrub bar or timeline ruler. With <i>Endless Scrubbing</i> on (<b>Edit › Settings</b>) the pointer wraps at the screen edge.</td></tr>
 <tr><td>In / Out loop</td><td><kbd>I</kbd> and <kbd>O</kbd> set the range, <kbd>Ctrl</kbd>+<kbd>L</kbd> toggles looping, <kbd>Alt</kbd>+<kbd>X</kbd> clears it.</td></tr>
 <tr><td>Bookmarks</td><td><kbd>K</kbd> toggles a bookmark; <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>→</kbd> jump between them.</td></tr>
 <tr><td>Stepped playback</td><td><kbd>Ctrl</kbd>+<kbd>Space</kbd> plays only the bookmarked frames, each held until the next — a quick way to read key poses or pose-to-pose timing. Sound is muted while stepping.</td></tr>
@@ -416,8 +418,8 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
 <h2><span class="n">16</span>Performance, GPU and NVDEC</h2>
 <ul>
   <li><b>GPU colour conversion.</b> Decoded video stays in its native Y′CbCr form in memory (4:2:0 = 1.5 bytes per pixel instead of 4 for RGB) and is converted to RGB by the graphics card while it is displayed. The same cache therefore holds about 2.6× more frames (62.5 % less memory per 4:2:0 frame, 50 % for 4:2:2 ProRes). Colour matrix (BT.601 / 709 / 2020) and video / full range are taken from the file.</li>
-  <li><b>NVDEC hardware decoding.</b> On NVIDIA GPUs, H.264, HEVC, VP9 and AV1 (AV1 needs an RTX 30-series or newer) decode on the GPU's video engine, freeing the CPU for playback, tracking and the UI. Frames go from the decoder straight into the cache in one copy. Formats NVDEC cannot handle (ProRes, 4:2:2 H.264, very large frames) and other GPUs decode on the CPU automatically, and a file that fails on the GPU mid-way switches to the CPU without losing your place. Toggle with <b>Tools › Hardware Decoding (NVDEC)</b>; Properties shows which decoder each clip uses.</li>
-  <li><b>Cache memory.</b> <b>Tools › Cache Memory…</b> sets the RAM for decoded frames (default: 25 % of RAM, up to 8 GB). The grey band on the scrub bar shows what is cached. CHARONOS reads ahead within the cache budget and keeps room for A, B and the next clip.</li>
+  <li><b>NVDEC hardware decoding.</b> On NVIDIA GPUs, H.264, HEVC, VP9 and AV1 (AV1 needs an RTX 30-series or newer) decode on the GPU's video engine, freeing the CPU for playback, tracking and the UI. Frames go from the decoder straight into the cache in one copy. Formats NVDEC cannot handle (ProRes, 4:2:2 H.264, very large frames) and other GPUs decode on the CPU automatically, and a file that fails on the GPU mid-way switches to the CPU without losing your place. Toggle with <b>Edit › Settings › Hardware Decoding (NVDEC)</b>; Properties shows which decoder each clip uses.</li>
+  <li><b>Cache memory.</b> <b>Edit › Settings › Cache Memory…</b> sets the RAM for decoded frames (default: 25 % of RAM, up to 8 GB). The grey band on the scrub bar shows what is cached. CHARONOS reads ahead within the cache budget and keeps room for A, B and the next clip.</li>
 </ul>
 <div class="callout tip"><b>Tip.</b> For heavy UHD material, keep NVDEC on and give the cache 8–16 GB. Use <b>Tools › Clear Cache</b> after replacing a file on disk.</div>
 </section>
@@ -457,7 +459,7 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
   <li>“Track the ball, then bookmark its key poses and tell me where the spacing is uneven.”</li>
   <li>“Compare my animation (B) with the reference (A) side by side and list the frames where the timing differs.”</li>
 </ul>
-<div class="callout"><b>Privacy and control.</b> The connection is a local named pipe that only your Windows user account can open; CHARONOS itself sends nothing over the network. Frames and notes the assistant reads are passed to the AI service by your AI client, as with anything you share with it. Whatever the assistant does goes through the normal commands, so it appears on screen and can be undone with <kbd>Ctrl</kbd>+<kbd>Z</kbd>. If the assistant tries to open another project while yours has unsaved changes, CHARONOS asks you first. Turn the connection off with <b>Tools › AI Assistant (MCP) › Allow AI Assistants to Connect</b>.</div>
+<div class="callout"><b>Privacy and control.</b> The connection is a local named pipe that only your Windows user account can open; CHARONOS itself sends nothing over the network. Frames and notes the assistant reads are passed to the AI service by your AI client, as with anything you share with it. Whatever the assistant does goes through the normal commands, so it appears on screen and can be undone with <kbd>Ctrl</kbd>+<kbd>Z</kbd>. If the assistant tries to open another project while yours has unsaved changes, CHARONOS asks you first. Turn the connection off with <b>Edit › Settings › Allow AI Assistants to Connect</b>.</div>
 </section>
 
 <section id="workflows">
@@ -482,7 +484,7 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
 
 <section id="shortcuts">
 <h2><span class="n">19</span>Keyboard shortcuts</h2>
-<p>These are the default keys. Change any of them in <b>Tools › HotKey Manager</b> <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>K</kbd>; <kbd>F1</kbd> shows your current set.</p>
+<p>These are the default keys. Change any of them in <b>Edit › Settings › HotKey Manager</b> <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>K</kbd>; <kbd>F1</kbd> shows your current set.</p>
 <div class="grid2">
 <div class="card"><h4>Timeline</h4><table>
 <tr><td>Selection / blade tool (timeline focused)</td><td><kbd>V</kbd> <kbd>A</kbd> · <kbd>B</kbd> <kbd>C</kbd></td></tr>
@@ -586,17 +588,17 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
 <table>
 <tr><th>Problem</th><th>What to do</th></tr>
 <tr><td>A panel disappeared</td><td>Window menu, or Window › Reset Layout.</td></tr>
-<tr><td>Playback stutters on UHD</td><td>Keep Tools › Hardware Decoding on, raise Tools › Cache Memory, let the grey cache band fill, or turn on Playback › Skip Frames to Keep Up.</td></tr>
+<tr><td>Playback stutters on UHD</td><td>Keep Edit › Settings › Hardware Decoding on, raise Edit › Settings › Cache Memory, let the grey cache band fill, or turn on Playback › Skip Frames to Keep Up.</td></tr>
 <tr><td>Colours look wrong on one file</td><td>Check Properties › Pixel Format. Untagged HD video is treated as BT.709 and SD as BT.601, like most players. Try turning hardware decoding off to compare.</td></tr>
 <tr><td>A file won't open</td><td>Open the Console (<kbd>Ctrl</kbd>+<kbd>`</kbd>) for the FFmpeg message. Re-wrap or re-encode unusual files with FFmpeg.</td></tr>
 <tr><td>Sound is late or early</td><td>Audio › Audio Offset… (positive values delay the picture).</td></tr>
 <tr><td>Media offline after moving a project</td><td>Keep media next to the project, or locate the files when asked on open.</td></tr>
-<tr><td>The AI assistant can't connect</td><td>Check Tools › AI Assistant (MCP) › Allow AI Assistants to Connect, make sure the path in the client config points to <code>charonos-mcp.exe</code> in the install folder, and restart the AI client. Only one CHARONOS window serves MCP at a time.</td></tr>
+<tr><td>The AI assistant can't connect</td><td>Check Edit › Settings › Allow AI Assistants to Connect, make sure the path in the client config points to <code>charonos-mcp.exe</code> in the install folder, and restart the AI client. Only one CHARONOS window serves MCP at a time.</td></tr>
 <tr><td>The Timeline panel is empty</td><td>Sources must be on the timeline: drag them from the Project View, or right-click a source › Add to Timeline.</td></tr>
 </table>
 </section>
 
-<footer>CHARONOS 1.2.1 · Built with Qt, FFmpeg (GPL) and OpenGL. © CHARONOS. This guide ships with the application and works offline.</footer>
+<footer>CHARONOS 1.2.2 · Built with Qt, FFmpeg (GPL) and OpenGL. © CHARONOS. This guide ships with the application and works offline.</footer>
 </main>
 </div>
 <script>

@@ -153,6 +153,8 @@ MainWindow::MainWindow(QWidget* parent)
 {
     QSettings settings;
     setObjectName("MainWindow");
+    m_alwaysOnTop = settings.value("window/alwaysOnTop", false).toBool();
+    setWindowFlag(Qt::WindowStaysOnTopHint, m_alwaysOnTop);
     m_realtime = settings.value("realtimePlayback", false).toBool();
     {
         // A preset (light / balanced / high, chosen in setup) unless a size was set by hand; always
@@ -383,6 +385,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(&m_trackPoll, &QTimer::timeout, this, &MainWindow::pollTracking);
 
     m_continueDrawing = settings.value("continueDrawing", false).toBool();
+    m_drawingMode = settings.value("drawing/mode", false).toBool();
     {
         const int layout = settings.value("compare/layout", int(CompareMode::SideBySide)).toInt();
         if (layout > int(CompareMode::Off) && layout <= int(CompareMode::Blend)) m_lastCompareMode = CompareMode(layout);
@@ -959,8 +962,16 @@ QWidget* MainWindow::buildBottomBar()
     for (int z : { 25, 50, 100, 200, 400 })
         zoomMenu->addAction(QStringLiteral("%1%").arg(z), this, [this, z] { m_view->setZoom(z / 100.0); });
     m_zoomBtn->setMenu(zoomMenu);
-    auto* fit = iconButton("fit", L("Fit  F", "화면에 맞추기  F"), 30, 18);
-    connect(fit, &QToolButton::clicked, m_view, &Viewport::fitToView);
+    m_fullscreenBtn = iconButton("fullscreen", L("Full Screen  F11", "전체 화면  F11"), 30, 18);
+    m_fullscreenBtn->setCheckable(true);
+    connect(m_fullscreenBtn, &QToolButton::clicked, this, &MainWindow::toggleFullscreenMode);
+    m_viewModeBtn = iconButton("eye", L("View Mode", "보기 모드"), 30, 18);
+    m_viewModeBtn->setCheckable(true);
+    connect(m_viewModeBtn, &QToolButton::clicked, this, [this](bool on) { setViewerOnly(on); });
+    m_topmostBtn = iconButton("pin", L("Keep on Top", "항상 위에 표시"), 30, 18);
+    m_topmostBtn->setCheckable(true);
+    m_topmostBtn->setChecked(m_alwaysOnTop);
+    connect(m_topmostBtn, &QToolButton::toggled, this, &MainWindow::setAlwaysOnTop);
     // volume (Keyframe Pro puts it next to the zoom readout)
     m_muteBtn = iconButton("volume", L("Mute", "소리 끄기"), 30, 18);
     m_muteBtn->setCheckable(true);
@@ -976,7 +987,9 @@ QWidget* MainWindow::buildBottomBar()
     h->addSpacing(14);
     h->addWidget(iconButton("zoom", QString(), 24, 15));
     h->addWidget(m_zoomBtn);
-    h->addWidget(fit);
+    h->addWidget(m_viewModeBtn);
+    h->addWidget(m_topmostBtn);
+    h->addWidget(m_fullscreenBtn);
     return bar;
 }
 
@@ -1375,21 +1388,33 @@ void MainWindow::buildMenus()
     });
     trackMenu->addAction(m_showTracksAction);
 
-    QMenu* toolsMenu = menuBar()->addMenu(L("Tools", "도구"));
-    add(toolsMenu, L("HotKey Manager...", "단축키 관리자..."), QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_K), [this] {
+    QMenu* settings = edit->addMenu(Icons::icon("settings"), L("Settings", "설정"));
+    add(settings, L("HotKey Manager...", "단축키 관리자..."), QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_K), [this] {
         HotkeyManager manager(m_hotkeys, this); manager.exec();
     });
+    QAction* drawingMode = settings->addAction(L("Drawing Mode (one-frame exposure)", "드로잉 모드 (한 프레임 노출)"));
+    drawingMode->setCheckable(true);
+    drawingMode->setChecked(m_drawingMode);
+    drawingMode->setToolTip(L("When enabled, annotations appear only on frames where they were drawn.",
+                              "켜면 주석은 실제로 그린 프레임에서만 표시됩니다."));
+    connect(drawingMode, &QAction::toggled, this, [this](bool on) {
+        m_drawingMode = on;
+        QSettings().setValue("drawing/mode", on);
+        refreshAnnotations();
+        refreshMarks();
+    });
+    QMenu* toolsMenu = menuBar()->addMenu(L("Tools", "도구"));
     add(toolsMenu, L("Console", "콘솔"), QKeySequence(Qt::CTRL | Qt::Key_QuoteLeft), [this] {
         m_console->setVisible(!m_console->isVisible());
     });
-    auto* endless = add(toolsMenu, L("Endless Scrubbing", "무한 스크러빙"), QKeySequence(), [this] {
+    auto* endless = add(settings, L("Endless Scrubbing", "무한 스크러빙"), QKeySequence(), [this] {
         m_endlessScrubbing = !m_endlessScrubbing;
         m_view->setEndlessScrubbing(m_endlessScrubbing);
         m_timeline->setEndlessScrubbing(m_endlessScrubbing);
         QSettings().setValue("endlessScrubbing", m_endlessScrubbing);
     });
     endless->setCheckable(true); endless->setChecked(m_endlessScrubbing);
-    QMenu* langMenu = toolsMenu->addMenu(QStringLiteral("Language / 언어"));
+    QMenu* langMenu = settings->addMenu(L("Language / 언어", "언어 / Language"));
     auto* langGroup = new QActionGroup(langMenu);
     for (const auto& [code, label] : { std::pair{ "en", "English" }, std::pair{ "ko", "한국어" } }) {
         QAction* a = langMenu->addAction(QString::fromUtf8(label));
@@ -1420,7 +1445,7 @@ void MainWindow::buildMenus()
         });
     }
     if (Platform::isAndroid()) {
-        QAction* penOnly = toolsMenu->addAction(L("Draw with Pen Only (fingers pan / zoom)", "펜으로만 그리기 (손가락은 이동 / 확대)"));
+        QAction* penOnly = settings->addAction(L("Draw with Pen Only (fingers pan / zoom)", "펜으로만 그리기 (손가락은 이동 / 확대)"));
         penOnly->setCheckable(true);
         penOnly->setChecked(QSettings().value("touch/penOnly", true).toBool());
         connect(penOnly, &QAction::toggled, this, [this](bool on) {
@@ -1428,8 +1453,8 @@ void MainWindow::buildMenus()
             QSettings().setValue("touch/penOnly", on);
         });
     }
-    toolsMenu->addSeparator();
-    m_hwAction = toolsMenu->addAction(L("Hardware Decoding (NVDEC)", "하드웨어 디코딩 (NVDEC)"));
+    settings->addSeparator();
+    m_hwAction = settings->addAction(L("Hardware Decoding (NVDEC)", "하드웨어 디코딩 (NVDEC)"));
     m_hwAction->setVisible(!Platform::isAndroid());
     m_hwAction->setCheckable(true);
     m_hwAction->setChecked(VideoDecoder::hardwareDecodingEnabled());
@@ -1445,7 +1470,7 @@ void MainWindow::buildMenus()
     });
 #ifndef CHARONOS_LITE
     QMenu* ai = toolsMenu->addMenu(Icons::icon("ai"), L("AI Assistant (MCP)", "AI 어시스턴트 (MCP)"));
-    m_mcpAction = ai->addAction(L("Allow AI Assistants to Connect", "AI 어시스턴트 연결 허용"));
+    m_mcpAction = settings->addAction(L("Allow AI Assistants to Connect", "AI 어시스턴트 연결 허용"));
     m_mcpAction->setCheckable(true);
     connect(m_mcpAction, &QAction::toggled, this, [this](bool on) {
         QSettings().setValue("ai/mcpEnabled", on);
@@ -1471,7 +1496,37 @@ void MainWindow::buildMenus()
     });
 #endif
     toolsMenu->addSeparator();
-    toolsMenu->addAction(L("Cache Memory...", "캐시 메모리..."), this, [this] { changeCacheBudget(); });
+    settings->addAction(L("Cache Memory...", "캐시 메모리..."), this, [this] { changeCacheBudget(); });
+    QAction* autoUpdate = settings->addAction(L("Check for Updates at Startup", "시작할 때 업데이트 확인"));
+    autoUpdate->setCheckable(true);
+    autoUpdate->setChecked(QSettings().value("update/autoCheck", true).toBool());
+    connect(autoUpdate, &QAction::toggled, this, [](bool on) { QSettings().setValue("update/autoCheck", on); });
+    settings->addSeparator();
+    settings->addAction(L("Factory Reset...", "공장 초기화..."), this, [this] {
+        const QString title = L("Factory Reset", "공장 초기화");
+        const QString message = L("This clears CHARONOS preferences and restores first-run setup. Project files are not deleted. Continue?",
+                                  "CHARONOS 환경설정을 지우고 최초 설정 상태로 되돌립니다. 프로젝트 파일은 삭제되지 않습니다. 계속할까요?");
+        if (QMessageBox::warning(this, title, message, QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
+        if (!maybeSave()) return;
+        if (Platform::isAndroid()) {
+            QSettings().clear();
+            QSettings().sync();
+            setDirty(false);
+            QApplication::quit();
+            return;
+        }
+        QStringList args;
+        if (!m_projectPath.isEmpty()) args << m_projectPath;
+        QSettings().clear();
+        QSettings().sync();
+        setDirty(false);
+        if (!QProcess::startDetached(QApplication::applicationFilePath(), args)) {
+            QMessageBox::warning(this, title, L("Settings were reset, but CHARONOS could not restart. Please start it again manually.",
+                                               "설정을 초기화했지만 CHARONOS를 다시 시작하지 못했습니다. 직접 다시 실행하세요."));
+            return;
+        }
+        QApplication::quit();
+    });
     toolsMenu->addAction(L("Clear Cache", "캐시 비우기"), this, [this] {
         m_media.clearCache();
         m_shownKey.clear();
@@ -1486,10 +1541,6 @@ void MainWindow::buildMenus()
     help->addAction(Icons::icon("help"), L("User Guide (English)", "사용 설명서 (영문)"), this, [this] { openUserGuide(); });
     help->addSeparator();
     help->addAction(L("Check for Updates...", "업데이트 확인..."), this, [this] { m_updates->check(true); })->setObjectName("CheckForUpdates");
-    QAction* autoUpdate = help->addAction(L("Check for Updates at Startup", "시작할 때 업데이트 확인"));
-    autoUpdate->setCheckable(true);
-    autoUpdate->setChecked(QSettings().value("update/autoCheck", true).toBool());
-    connect(autoUpdate, &QAction::toggled, this, [](bool on) { QSettings().setValue("update/autoCheck", on); });
     help->addAction(L("Releases on GitHub", "GitHub 릴리스"), this, [] { Platform::openExternal(Edition::releasesPage()); });
     for (QAction* a : menuBar()->actions())
         if (a->menu()) m_topMenus << a->menu();
@@ -1998,6 +2049,7 @@ void MainWindow::exportDialog()
     job.scale = dlg.scale();
     job.margin = dlg.margin();
     job.notes = dlg.notes();
+    job.explicitNotesOnly = m_drawingMode;
     job.caption = dlg.caption();
     job.tracks = dlg.tracks();
     job.trackRange = trailFrames();
@@ -2147,7 +2199,7 @@ void MainWindow::exportCurrentFrame()
     const QImage* frame = &still;
     FrameExportDialog dialog(*frame, *source, int(notesFrame), this, trailFrames());
     if (dialog.exec() != QDialog::Accepted) return;
-    auto options = dialog.options(); options.trackRange = trailFrames();
+    auto options = dialog.options(); options.trackRange = trailFrames(); options.explicitNotesOnly = m_drawingMode;
     QSettings s;
     const QString base = QFileInfo(source->displayName()).completeBaseName();
     const QString suffix = QString::fromLatin1(dialog.format());
@@ -2931,7 +2983,7 @@ void MainWindow::refreshAnnotations()
         return;
     }
     const int local = int(loc.rawLocal);
-    for (const Source::Entry& e : loc.source->renderable(local)) items.append({ loc.source->evaluated(*e.annotation, local), e.inherited });
+    for (const Source::Entry& e : loc.source->renderable(local, m_drawingMode)) items.append({ loc.source->evaluated(*e.annotation, local), e.inherited });
 
     // Onion skin for one side, the way 2D animation packages do it:
     //  - drawings: the previous / next drawings (Keys mode) or whatever is drawn N frames away
@@ -2971,6 +3023,7 @@ void MainWindow::refreshAnnotations()
         const QColor before = m_onionTint ? m_onionBeforeColor : QColor();
         const QColor after = m_onionTint ? m_onionAfterColor : QColor();
         auto addDrawing = [&](int key, int evalFrame, const QColor& tint, double opacity) {
+            if (m_drawingMode) return;
             const auto it = src.annotations.find(key);
             if (it == src.annotations.end()) return;
             for (const Annotation& a : it->second)
@@ -3025,7 +3078,7 @@ void MainWindow::refreshAnnotations()
     FrameServer* bs = b ? m_media.server(m_compareId) : nullptr;
     const int bLocal = bs ? int(compareFrameFor(loc.rawLocal)) : 0;
     if (bs) {
-        for (const Source::Entry& e : b->renderable(bLocal)) bItems.append({ b->evaluated(*e.annotation, bLocal), e.inherited });
+        for (const Source::Entry& e : b->renderable(bLocal, m_drawingMode)) bItems.append({ b->evaluated(*e.annotation, bLocal), e.inherited });
         // B's video ghosts only where B has its own area (they would sit on A otherwise)
         if (showGhosts) onion(*b, bs, bLocal, bs->frameCount(), 1);
     }
@@ -3345,7 +3398,7 @@ void MainWindow::onAnnotationCreated(Annotation a)
     notes::placeNew(*t.source, int(std::max<int64_t>(t.frameCount, t.source->frameCount)), f, a,
                     m_continueDrawing || t.source->explicitAt(f).has_value());
     if (m_continueDrawing)
-        t.source->editable(f).append(std::move(a));
+        t.source->editable(f, m_drawingMode).append(std::move(a));
     else
         t.source->annotations[f].append(std::move(a));  // a new key: earlier drawings stop here
     commitEdit();
@@ -3357,7 +3410,7 @@ bool MainWindow::editShownKey(const std::function<void(AnnotationList&)>& fn, bo
     if (!t) return false;
     if (t.source->keyAt(t.frame) < 0) return false;
     AnnotationList before;
-    for (const auto& e : t.source->renderable(t.frame)) before.append(*e.annotation);
+    for (const auto& e : t.source->renderable(t.frame, m_drawingMode)) before.append(*e.annotation);
     AnnotationList after = before;
     fn(after);
     if (annotationsToJson(before) == annotationsToJson(after)) {
@@ -3367,7 +3420,7 @@ bool MainWindow::editShownKey(const std::function<void(AnnotationList&)>& fn, bo
     // Copy the held state at the playhead before editing it. Earlier keys and
     // later explicit keys remain intact; this state holds until the next key.
     beginEdit(t.source->id, t.frame);
-    t.source->editable(t.frame) = std::move(after);
+    t.source->editable(t.frame, m_drawingMode) = std::move(after);
     if (commit) commitEdit();
     else refreshAnnotations();
     return true;
@@ -3378,7 +3431,7 @@ void MainWindow::onEraseAt(QPointF mediaPoint, double radius)
     const EditTarget t = editTarget();
     if (!t) return;
     QSet<QString> hits;
-    for (const Source::Entry& e : t.source->renderable(t.frame))
+    for (const Source::Entry& e : t.source->renderable(t.frame, m_drawingMode))
         if (!e.annotation->locked && AnnotationPainter::hit(t.source->evaluated(*e.annotation, t.frame), t.size, mediaPoint, radius)) hits.insert(e.annotation->id);
     if (hits.isEmpty()) return;
     // Erasing also starts a new state at the playhead, including an empty state.
@@ -3410,7 +3463,7 @@ const Annotation* MainWindow::firstSelected()
     if (ids.isEmpty()) return nullptr;
     const EditTarget t = editTarget();
     if (!t) return nullptr;
-    for (const Source::Entry& e : t.source->renderable(t.frame))
+    for (const Source::Entry& e : t.source->renderable(t.frame, m_drawingMode))
         if (ids.contains(e.annotation->id)) return e.annotation;
     return nullptr;
 }
@@ -3432,7 +3485,7 @@ void MainWindow::copySelection()
     const EditTarget t = editTarget();
     if (ids.isEmpty() || !t) return;
     m_clipboard.clear();
-    for (const Source::Entry& e : t.source->renderable(t.frame))
+    for (const Source::Entry& e : t.source->renderable(t.frame, m_drawingMode))
         if (ids.contains(e.annotation->id)) {
             Annotation a = t.source->evaluated(*e.annotation, t.frame);
             a.trackId.clear(); // copied notes keep their on-screen position across sources
@@ -3447,7 +3500,7 @@ void MainWindow::pasteClipboard()
     if (!t || m_clipboard.isEmpty()) return;
     const int f = t.frame;
     beginEdit(t.source->id, f);
-    AnnotationList& list = m_continueDrawing ? t.source->editable(f) : t.source->annotations[f];
+    AnnotationList& list = m_continueDrawing ? t.source->editable(f, m_drawingMode) : t.source->annotations[f];
     QStringList ids;
     for (Annotation a : m_clipboard) {
         a.id = Annotation::newId();
@@ -3874,7 +3927,7 @@ void MainWindow::toggleBookmark()
         loc.source->bookmarks.erase(f);
     } else {
         AnnotationList snapshot;
-        for (const Source::Entry& e : loc.source->renderable(f)) snapshot.append(loc.source->evaluated(*e.annotation, f));
+        for (const Source::Entry& e : loc.source->renderable(f, m_drawingMode)) snapshot.append(loc.source->evaluated(*e.annotation, f));
         loc.source->bookmarks[f] = snapshot;
     }
     setDirty(true);
@@ -4424,7 +4477,7 @@ void MainWindow::showViewportMenu(QPoint global, QString noteId, QString trackId
         const Annotation* note = nullptr;
         const EditTarget t = editTarget();
         if (t)
-            for (const Source::Entry& e : t.source->renderable(t.frame))
+            for (const Source::Entry& e : t.source->renderable(t.frame, m_drawingMode))
                 if (e.annotation->id == noteId) note = e.annotation;
         if (!note) return;
         if (note->locked) {
@@ -4944,6 +4997,8 @@ void MainWindow::autosaveForBackground()
 void MainWindow::changeEvent(QEvent* e)
 {
     QMainWindow::changeEvent(e);
+    if (e->type() == QEvent::WindowStateChange && m_fullscreenBtn)
+        m_fullscreenBtn->setChecked(isFullScreen());
     if (e->type() != QEvent::WindowStateChange || Platform::isAndroid()) return;
     if (isMinimized()) {
         m_backgroundTimer.start();

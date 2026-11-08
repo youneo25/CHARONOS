@@ -7,6 +7,7 @@
 #include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFileDialog>
 #include <QHBoxLayout>
@@ -19,6 +20,7 @@
 #include <QStackedWidget>
 #include <QStyle>
 #include <QTimer>
+#include <QUrl>
 #include <QVBoxLayout>
 
 namespace {
@@ -97,6 +99,7 @@ SetupWizard::SetupWizard(QWidget* parent)
     m_hardware = s.value("decode/hardware", true).toBool();
     m_updates = s.value("update/autoCheck", true).toBool();
     m_mcp = s.value("ai/mcpEnabled", true).toBool();
+    m_drawingMode = s.value("drawing/mode", false).toBool();
     m_exportDir = s.value("export/dir", Platform::exportDir()).toString();
     if (m_exportDir.startsWith(QLatin1String("F:/Codex"))) m_exportDir = Platform::exportDir();  // 1.1's developer default
 
@@ -177,6 +180,7 @@ void SetupWizard::rebuild()
     connect(skip, &QPushButton::clicked, this, [this] {
         applyDefaults();
         QSettings().setValue("ui/language", m_korean ? "ko" : "en");
+        QSettings().setValue("drawing/mode", m_drawingMode);
         accept();
     });
     connect(back, &QPushButton::clicked, this, [this] { go(m_page - 1); });
@@ -271,6 +275,12 @@ QWidget* SetupWizard::workspacePage()
     hint->setObjectName("Muted");
     hint->setWordWrap(true);
     v->addWidget(hint);
+    auto* drawingMode = new QCheckBox(L("Drawing Mode: show annotations only on the frame where they were drawn",
+                                        "드로잉 모드: 주석을 그린 프레임에서만 표시"));
+    drawingMode->setChecked(m_drawingMode);
+    connect(drawingMode, &QCheckBox::toggled, this, [this](bool on) { m_drawingMode = on; });
+    v->addSpacing(8);
+    v->addWidget(drawingMode);
     v->addStretch(1);
     return page;
 }
@@ -406,6 +416,12 @@ QWidget* SetupWizard::readyPage()
         l->setWordWrap(true);
         v->addWidget(l);
     }
+    auto* tutorial = new QPushButton(L("Open User Guide (HTML)", "사용 설명서 열기 (HTML)"));
+    connect(tutorial, &QPushButton::clicked, this, [this] {
+        const QString path = QDir(QApplication::applicationDirPath()).filePath(QStringLiteral("docs/CHARONOS-User-Guide.html"));
+        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+    });
+    v->addWidget(tutorial, 0, Qt::AlignLeft);
     v->addStretch(1);
     return page;
 }
@@ -420,6 +436,7 @@ void SetupWizard::finish()
 {
     QSettings s;
     s.setValue("ui/language", m_korean ? "ko" : "en");
+    s.setValue("drawing/mode", m_drawingMode);
     writePanelDefaults(m_panels.value("toolStrip"), m_panels.value("clipBar"), m_panels.value("scrubBar", true),
                        m_panels.value("transport", true), m_panels.value("timelineVisible"));
     s.remove("cacheBudgetBytes");  // a preset from now on (Tools > Cache Memory can set GB again)

@@ -50,5 +50,6 @@ private:
     bool m_hardware = true;
     bool m_updates = true;
     bool m_mcp = true;
+    bool m_drawingMode = false;
     QString m_exportDir;
 };

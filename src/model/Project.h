@@ -41,11 +41,11 @@ struct Source {
         const Annotation* annotation;
         bool inherited;
     };
-    QVector<Entry> renderable(int frame) const;
+    QVector<Entry> renderable(int frame, bool explicitOnly = false) const;
     Annotation evaluated(Annotation a, int frame, bool inverse = false) const;
     std::optional<AnnotationList> explicitAt(int frame) const;
     void setExplicit(int frame, std::optional<AnnotationList> list);
-    AnnotationList& editable(int frame);  // materializes inherited annotations into this frame
+    AnnotationList& editable(int frame, bool explicitOnly = false);  // materializes inherited annotations into this frame
     QVector<int> annotatedFrames() const;
     QVector<ReviewRange> reviewRanges(qint64 count) const;
     int keyAt(int frame) const;  // explicit frame whose annotations show at this frame, or -1

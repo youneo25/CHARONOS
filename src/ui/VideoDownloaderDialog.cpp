@@ -4,8 +4,6 @@
 #include "platform/Platform.h"
 
 #include <QDir>
-#include <QApplication>
-#include <QClipboard>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QFileDialog>
@@ -13,6 +11,9 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -21,13 +22,19 @@
 #include <QNetworkRequest>
 #include <QPlainTextEdit>
 #include <QProgressBar>
+#include <QPixmap>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStandardPaths>
 #include <QSettings>
 #include <QUrl>
 #include <QUuid>
 #include <QVBoxLayout>
+
+#include <algorithm>
+#include <functional>
+#include <numeric>
 
 namespace {
 QLabel* sectionTitle(const QString& text)
@@ -49,6 +56,19 @@ QWidget* section(const QString& title, QWidget* body)
     layout->addWidget(body);
     return box;
 }
+
+QLabel* formLabel(const QString& text)
+{
+    auto* label = new QLabel(text);
+    label->setObjectName("FormKey");
+    label->setFixedWidth(104);
+    return label;
+}
+
+void sizeButton(QPushButton* button, int width = 92, int height = 32)
+{
+    button->setFixedSize(width, height);
+}
 }
 
 VideoDownloaderDialog::VideoDownloaderDialog(QWidget* parent)
@@ -68,23 +88,62 @@ VideoDownloaderDialog::VideoDownloaderDialog(QWidget* parent)
     m_url = new QLineEdit;
     m_url->setObjectName("DownloaderUrl");
     m_url->setPlaceholderText(L("YouTube, bilibili, or another yt-dlp link", "YouTube, bilibili 또는 yt-dlp 지원 링크"));
-    m_url->setMinimumHeight(34);
-    const QString clipboard = QApplication::clipboard()->text().trimmed();
-    if (QUrl candidate(clipboard); candidate.isValid() && !candidate.host().isEmpty()) m_url->setText(clipboard);
+    m_url->setFixedHeight(34);
 
     auto* urlBody = new QWidget;
     auto* urlLayout = new QFormLayout(urlBody);
     urlLayout->setContentsMargins(0, 0, 0, 0);
-    urlLayout->addRow(L("Video link", "영상 링크"), m_url);
+    urlLayout->setHorizontalSpacing(10);
+    urlLayout->setVerticalSpacing(8);
+    urlLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    urlLayout->addRow(formLabel(L("Video link", "영상 링크")), m_url);
     auto* urlSection = section(L("Video", "비디오"), urlBody);
+
+    m_thumbnail = new QLabel(L("No preview", "미리보기 없음"));
+    m_thumbnail->setObjectName("ExportPreview");
+    m_thumbnail->setAlignment(Qt::AlignCenter);
+    m_thumbnail->setMinimumSize(260, 146);
+    m_thumbnail->setMaximumHeight(190);
+    m_infoTitle = new QLabel(L("Paste a link to inspect the video", "링크를 붙여넣으면 영상 정보를 표시합니다"));
+    m_infoTitle->setWordWrap(true);
+    m_infoTitle->setObjectName("SectionTitle");
+    m_infoDetails = new QLabel;
+    m_infoDetails->setWordWrap(true);
+    m_infoDetails->setObjectName("Muted");
+    auto* infoText = new QWidget;
+    auto* infoTextLayout = new QVBoxLayout(infoText);
+    infoTextLayout->setContentsMargins(0, 0, 0, 0);
+    infoTextLayout->setSpacing(6);
+    infoTextLayout->addWidget(m_infoTitle);
+    infoTextLayout->addWidget(m_infoDetails);
+    infoTextLayout->addStretch(1);
+    auto* infoBody = new QWidget;
+    auto* infoLayout = new QVBoxLayout(infoBody);
+    infoLayout->setContentsMargins(0, 0, 0, 0);
+    infoLayout->setSpacing(12);
+    infoLayout->addWidget(m_thumbnail, 0, Qt::AlignHCenter);
+    infoLayout->addWidget(infoText, 1);
+    auto* infoSection = section(L("Video info", "영상 정보"), infoBody);
 
     m_format = new QComboBox;
     m_format->addItem(L("Video with audio (best quality)", "비디오 + 오디오 (최고 화질)"), "video-audio");
     m_format->addItem(L("Video only", "비디오만"), "video-only");
     m_format->addItem(L("Audio only", "오디오만"), "audio-only");
+    m_resolution = new QComboBox;
+    m_resolution->addItem(L("Best available", "최고 해상도"), 0);
+    m_resolution->setFixedHeight(34);
+    m_native = new QPushButton(L("Native", "원본"));
+    sizeButton(m_native);
+    auto* resolutionRow = new QWidget;
+    auto* resolutionLayout = new QHBoxLayout(resolutionRow);
+    resolutionLayout->setContentsMargins(0, 0, 0, 0);
+    resolutionLayout->setSpacing(6);
+    resolutionLayout->addWidget(m_resolution, 1);
+    resolutionLayout->addWidget(m_native);
     m_cookies = new QLineEdit;
     m_cookies->setPlaceholderText(L("Cookies.txt (optional; helps with login restricted videos)", "Cookies.txt (선택 사항, 로그인 제한 영상용)"));
     auto* cookiesBrowse = new QPushButton(L("Browse...", "찾아보기..."));
+    sizeButton(cookiesBrowse);
     connect(cookiesBrowse, &QPushButton::clicked, this, [this] {
         const QString path = QFileDialog::getOpenFileName(this, L("Choose cookies file", "쿠키 파일 선택"), {}, "Cookies (*.txt);;All files (*)");
         if (!path.isEmpty()) m_cookies->setText(QDir::toNativeSeparators(path));
@@ -92,37 +151,50 @@ VideoDownloaderDialog::VideoDownloaderDialog(QWidget* parent)
     auto* cookiesRow = new QWidget;
     auto* cookiesLayout = new QHBoxLayout(cookiesRow);
     cookiesLayout->setContentsMargins(0, 0, 0, 0);
+    cookiesLayout->setSpacing(6);
     cookiesLayout->addWidget(m_cookies, 1);
     cookiesLayout->addWidget(cookiesBrowse);
+    m_cookies->setFixedHeight(34);
     auto* optionsBody = new QWidget;
     auto* optionsLayout = new QFormLayout(optionsBody);
     optionsLayout->setContentsMargins(0, 0, 0, 0);
-    optionsLayout->addRow(L("Download type", "다운로드 종류"), m_format);
-    optionsLayout->addRow(L("Cookies (optional; useful for bilibili login)", "쿠키 (선택 사항, 빌리빌리 로그인에 유용)"), cookiesRow);
+    optionsLayout->setHorizontalSpacing(10);
+    optionsLayout->setVerticalSpacing(10);
+    optionsLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    m_format->setFixedHeight(34);
+    optionsLayout->addRow(formLabel(L("Download type", "다운로드 종류")), m_format);
+    optionsLayout->addRow(formLabel(L("Resolution", "해상도")), resolutionRow);
+    optionsLayout->addRow(formLabel(L("Cookies", "쿠키")), cookiesRow);
     auto* optionsSection = section(L("Options", "옵션"), optionsBody);
 
     m_folder = new QLineEdit;
     QString folder = QSettings().value("videoDownloader/dir").toString();
     if (folder.isEmpty()) folder = QDir(QStandardPaths::writableLocation(QStandardPaths::MoviesLocation)).filePath("CHARONOS Downloads");
     m_folder->setText(QDir::toNativeSeparators(folder));
+    m_folder->setFixedHeight(34);
     auto* browse = new QPushButton(L("Browse...", "찾아보기..."));
+    sizeButton(browse);
     connect(browse, &QPushButton::clicked, this, &VideoDownloaderDialog::browseFolder);
     auto* destination = new QWidget;
     auto* destRow = new QHBoxLayout(destination);
     destRow->setContentsMargins(0, 0, 0, 0);
+    destRow->setSpacing(6);
     destRow->addWidget(m_folder, 1);
     destRow->addWidget(browse);
     auto* destSection = section(L("Save to", "저장 위치"), destination);
 
     m_status = new QLabel(L("Ready", "준비됨"));
     m_status->setObjectName("Muted");
+    m_status->setWordWrap(true);
     m_progress = new QProgressBar;
     m_progress->setRange(0, 100);
     m_progress->setValue(0);
+    m_progress->setFixedHeight(12);
     m_log = new QPlainTextEdit;
     m_log->setReadOnly(true);
     m_log->setMaximumBlockCount(250);
     m_log->setMinimumHeight(90);
+    m_log->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_log->setPlaceholderText(L("Download progress and messages will appear here.", "다운로드 진행 상황과 안내가 여기에 표시됩니다."));
     auto* progressBody = new QWidget;
     auto* progressLayout = new QVBoxLayout(progressBody);
@@ -130,17 +202,42 @@ VideoDownloaderDialog::VideoDownloaderDialog(QWidget* parent)
     progressLayout->setSpacing(8);
     progressLayout->addWidget(m_status);
     progressLayout->addWidget(m_progress);
-    progressLayout->addWidget(m_log);
+    progressLayout->addWidget(m_log, 1);
 
     m_cancel = new QPushButton(L("Close", "닫기"));
+    sizeButton(m_cancel, 104, 34);
     m_download = new QPushButton(L("Download", "다운로드"));
+    sizeButton(m_download, 104, 34);
     m_download->setObjectName("Primary");
     m_download->setDefault(true);
     connect(m_cancel, &QPushButton::clicked, this, &VideoDownloaderDialog::cancelOrClose);
     connect(m_download, &QPushButton::clicked, this, &VideoDownloaderDialog::ensureDownloaderAndStart);
+    connect(m_native, &QPushButton::clicked, this, [this] {
+        const int index = m_resolution->findData(m_nativeHeight);
+        if (m_videoInfoReady && index >= 0) m_resolution->setCurrentIndex(index);
+    });
     connect(&m_androidPoll, &QTimer::timeout, this, &VideoDownloaderDialog::pollAndroidDownload);
-    connect(&m_process, &QProcess::readyReadStandardOutput, this, [this] { appendOutput(QString::fromUtf8(m_process.readAllStandardOutput())); });
-    connect(&m_process, &QProcess::readyReadStandardError, this, [this] { appendOutput(QString::fromUtf8(m_process.readAllStandardError())); });
+    m_infoDebounce.setSingleShot(true);
+    m_infoDebounce.setInterval(500);
+    connect(&m_infoDebounce, &QTimer::timeout, this, &VideoDownloaderDialog::lookupVideoInfo);
+    connect(m_url, &QLineEdit::textEdited, this, [this] { handleUrlChanged(); });
+    connect(m_format, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
+        const bool video = m_format->currentData().toString() != "audio-only";
+        if (!m_infoLoading) {
+            m_resolution->setEnabled(m_videoInfoReady && video);
+            m_native->setEnabled(m_videoInfoReady && m_nativeHeight > 0 && video);
+        }
+    });
+    connect(&m_process, &QProcess::readyReadStandardOutput, this, [this] {
+        const QByteArray output = m_process.readAllStandardOutput();
+        if (m_fetchingInfo) m_infoOutput += output;
+        else appendOutput(QString::fromUtf8(output));
+    });
+    connect(&m_process, &QProcess::readyReadStandardError, this, [this] {
+        const QByteArray output = m_process.readAllStandardError();
+        if (m_fetchingInfo) m_infoErrors += output;
+        else appendOutput(QString::fromUtf8(output));
+    });
     connect(&m_process, &QProcess::finished, this, [this](int code, QProcess::ExitStatus exitStatus) {
         const bool install = m_installing;
         m_installing = false;
@@ -165,6 +262,26 @@ VideoDownloaderDialog::VideoDownloaderDialog(QWidget* parent)
             } else {
                 setBusy(false);
                 m_status->setText(L("Could not update yt-dlp. Update it manually and retry.", "yt-dlp를 업데이트하지 못했습니다. 직접 업데이트한 뒤 다시 시도하세요."));
+            }
+            return;
+        }
+
+        if (m_fetchingInfo) {
+            m_infoOutput += m_process.readAllStandardOutput();
+            m_infoErrors += m_process.readAllStandardError();
+            m_fetchingInfo = false;
+            const bool currentUrl = m_infoUrl == m_url->text().trimmed();
+            if (currentUrl) {
+                if (exitStatus == QProcess::NormalExit && code == 0) showVideoInfo(m_infoOutput);
+                else showVideoInfoError(QString::fromUtf8(m_infoErrors).trimmed());
+                m_infoLoading = false;
+            }
+            setBusy(false);
+            m_infoOutput.clear();
+            m_infoErrors.clear();
+            if (m_pendingInfoLookup) {
+                m_pendingInfoLookup = false;
+                QTimer::singleShot(0, this, &VideoDownloaderDialog::lookupVideoInfo);
             }
             return;
         }
@@ -197,20 +314,37 @@ VideoDownloaderDialog::VideoDownloaderDialog(QWidget* parent)
         }
     });
 
-    auto* buttons = new QHBoxLayout;
-    buttons->addStretch(1);
-    buttons->addWidget(m_cancel);
-    buttons->addWidget(m_download);
+    auto* columns = new QHBoxLayout;
+    columns->setSpacing(12);
+    auto* leftColumn = new QVBoxLayout;
+    leftColumn->setSpacing(12);
+    leftColumn->addWidget(urlSection);
+    leftColumn->addWidget(optionsSection);
+    auto* centerColumn = new QVBoxLayout;
+    centerColumn->addWidget(infoSection, 1);
+    columns->addLayout(leftColumn, 43);
+    columns->addLayout(centerColumn, 57);
+
+    auto* footer = new QVBoxLayout;
+    footer->setSpacing(10);
+    footer->addWidget(destSection);
+    auto* actions = new QHBoxLayout;
+    actions->setContentsMargins(0, 0, 0, 0);
+    actions->setSpacing(10);
+    actions->addStretch(1);
+    actions->addWidget(m_cancel);
+    actions->addWidget(m_download);
+    footer->addLayout(actions);
     auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(18, 16, 18, 16);
-    layout->setSpacing(14);
+    layout->setContentsMargins(20, 16, 20, 16);
+    layout->setSpacing(12);
     layout->addWidget(intro);
-    layout->addWidget(urlSection);
-    layout->addWidget(optionsSection);
-    layout->addWidget(destSection);
-    layout->addWidget(section(L("Progress", "진행 상황"), progressBody), 1);
-    layout->addLayout(buttons);
-    resize(720, 570);
+    layout->addLayout(columns, 1);
+    layout->addWidget(section(L("Download status", "다운로드 상태"), progressBody));
+    layout->addLayout(footer);
+    m_resolution->setEnabled(false);
+    m_native->setEnabled(false);
+    resize(1080, 740);
 }
 
 QString VideoDownloaderDialog::downloaderPath() const
@@ -227,6 +361,262 @@ QString VideoDownloaderDialog::downloaderPath() const
     return {};
 }
 
+void VideoDownloaderDialog::installDownloader(bool forInfo)
+{
+#ifdef Q_OS_WIN
+    const QString path = QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath("tools/yt-dlp.exe");
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    m_pendingUrl = m_url->text().trimmed();
+    m_pendingFolder = m_folder->text().trimmed();
+    m_installForInfo = forInfo;
+    m_installing = true;
+    setBusy(true);
+    m_status->setText(forInfo ? L("Preparing video information…", "영상 정보 준비 중…")
+                              : L("Preparing yt-dlp…", "yt-dlp 준비 중…"));
+    m_log->appendPlainText(L("Downloading the official yt-dlp Windows release.", "공식 yt-dlp Windows 버전을 다운로드합니다."));
+    QNetworkRequest request(QUrl("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"));
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = m_network->get(request);
+    connect(reply, &QNetworkReply::downloadProgress, this, [this](qint64 received, qint64 total) {
+        if (total > 0) m_progress->setValue(int(received * 100 / total));
+    });
+    connect(reply, &QNetworkReply::finished, this, [this, reply, path] {
+        const QByteArray data = reply->readAll();
+        const auto error = reply->error();
+        const QString errorText = reply->errorString();
+        reply->deleteLater();
+        if (!m_installing) return;
+        const bool forInfo = m_installForInfo;
+        m_installing = false;
+        m_installForInfo = false;
+        if (error != QNetworkReply::NoError || data.size() < 1024 * 1024) {
+            setBusy(false);
+            if (forInfo) {
+                m_infoLoading = false;
+                showVideoInfoError(L("Could not download yt-dlp: %1", "yt-dlp를 다운로드하지 못했습니다: %1").arg(errorText));
+                setBusy(false);
+            } else {
+                m_status->setText(L("Could not download yt-dlp: %1", "yt-dlp를 다운로드하지 못했습니다: %1").arg(errorText));
+            }
+            return;
+        }
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size()) {
+            setBusy(false);
+            const QString error = L("Could not save yt-dlp in the app data folder.", "앱 데이터 폴더에 yt-dlp를 저장하지 못했습니다.");
+            if (forInfo) {
+                m_infoLoading = false;
+                showVideoInfoError(error);
+                setBusy(false);
+            } else {
+                m_status->setText(error);
+            }
+            return;
+        }
+        file.close();
+        m_progress->setValue(0);
+        m_status->setText(L("yt-dlp is ready.", "yt-dlp 준비 완료."));
+        if (forInfo) lookupVideoInfo();
+        else {
+            m_url->setText(m_pendingUrl);
+            m_folder->setText(QDir::toNativeSeparators(m_pendingFolder));
+            startDownload();
+        }
+    });
+#else
+    Q_UNUSED(forInfo);
+    const QString message = L("Install yt-dlp and make it available on PATH, then try again.",
+                              "yt-dlp를 설치하고 PATH에 등록한 뒤 다시 시도하세요.");
+    if (forInfo) {
+        m_infoLoading = false;
+        showVideoInfoError(message);
+    } else {
+        QMessageBox::information(this, L("yt-dlp required", "yt-dlp 필요"), message);
+    }
+#endif
+}
+
+void VideoDownloaderDialog::handleUrlChanged()
+{
+    m_infoDebounce.stop();
+    ++m_infoGeneration;
+    if (m_thumbnailReply) {
+        m_thumbnailReply->abort();
+        m_thumbnailReply = nullptr;
+    }
+    m_thumbnail->setPixmap(QPixmap());
+    m_thumbnail->setText(L("No preview", "미리보기 없음"));
+    m_infoTitle->setText(L("Checking video link…", "영상 링크 확인 중…"));
+    m_infoDetails->clear();
+    m_videoInfoReady = false;
+    m_nativeHeight = 0;
+    m_resolution->clear();
+    m_resolution->addItem(L("Best available", "최고 해상도"), 0);
+
+    const QUrl url(m_url->text().trimmed());
+    const bool valid = url.isValid() && (url.scheme() == "http" || url.scheme() == "https") && !url.host().isEmpty();
+    m_infoLoading = valid;
+    if (!valid) {
+        m_infoTitle->setText(L("Paste a link to inspect the video", "링크를 붙여넣으면 영상 정보를 표시합니다"));
+    } else {
+        m_infoDebounce.start();
+    }
+    setBusy(false);
+
+    if (m_fetchingInfo && m_process.state() != QProcess::NotRunning) {
+        m_pendingInfoLookup = false;
+        m_process.kill();
+    }
+}
+
+void VideoDownloaderDialog::lookupVideoInfo()
+{
+    const QString url = m_url->text().trimmed();
+    const QUrl parsed(url);
+    if (!parsed.isValid() || (parsed.scheme() != "http" && parsed.scheme() != "https") || parsed.host().isEmpty()) {
+        m_infoLoading = false;
+        setBusy(false);
+        return;
+    }
+    if (m_process.state() != QProcess::NotRunning) {
+        m_pendingInfoLookup = true;
+        if (m_fetchingInfo && m_infoUrl != url) m_process.kill();
+        return;
+    }
+    if (downloaderPath().isEmpty()) {
+#ifdef Q_OS_WIN
+        installDownloader(true);
+#else
+        m_infoLoading = false;
+        showVideoInfoError(L("Install yt-dlp and make it available on PATH to inspect video details.",
+                             "영상 정보를 확인하려면 yt-dlp를 설치하고 PATH에 등록하세요."));
+        setBusy(false);
+#endif
+        return;
+    }
+
+    m_infoUrl = url;
+    m_infoOutput.clear();
+    m_infoErrors.clear();
+    m_fetchingInfo = true;
+    setBusy(false);
+    QStringList args{"--ignore-config", "--no-warnings", "--no-colors", "--no-playlist", "--skip-download", "--dump-single-json"};
+    const QString cookies = m_cookies->text().trimmed();
+    if (!cookies.isEmpty()) args << "--cookies" << cookies;
+    args << url;
+    m_process.setProgram(downloaderPath());
+    m_process.setArguments(args);
+    m_process.start();
+    if (!m_process.waitForStarted(3000)) {
+        m_fetchingInfo = false;
+        m_infoLoading = false;
+        showVideoInfoError(L("Could not start yt-dlp: %1", "yt-dlp를 실행하지 못했습니다: %1").arg(m_process.errorString()));
+        setBusy(false);
+    }
+}
+
+void VideoDownloaderDialog::showVideoInfo(const QByteArray& json)
+{
+    QJsonParseError parseError{};
+    const QJsonDocument document = QJsonDocument::fromJson(json, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        showVideoInfoError(L("Could not read video information.", "영상 정보를 읽지 못했습니다."));
+        return;
+    }
+
+    const QJsonObject video = document.object();
+    QSet<int> heights;
+    int maxHeight = video.value("height").toInt();
+    int maxWidth = video.value("width").toInt();
+    double fps = video.value("fps").toDouble();
+    const QJsonArray formats = video.value("formats").toArray();
+    for (const QJsonValue& value : formats) {
+        const QJsonObject format = value.toObject();
+        const QString codec = format.value("vcodec").toString();
+        if (codec.isEmpty() || codec == "none") continue;
+        const int height = format.value("height").toInt();
+        const int width = format.value("width").toInt();
+        if (height <= 0) continue;
+        heights.insert(height);
+        if (height > maxHeight || (height == maxHeight && width > maxWidth)) {
+            maxHeight = height;
+            maxWidth = width;
+            fps = format.value("fps").toDouble();
+        } else if (height == maxHeight && fps <= 0.0) {
+            fps = format.value("fps").toDouble();
+        }
+    }
+    if (maxHeight > 0) heights.insert(maxHeight);
+    QList<int> sortedHeights = heights.values();
+    std::sort(sortedHeights.begin(), sortedHeights.end(), std::greater<int>());
+    m_resolution->clear();
+    m_resolution->addItem(L("Best available", "최고 해상도"), 0);
+    for (int height : sortedHeights) {
+        m_resolution->addItem(L("%1p or lower", "%1p 이하").arg(height), height);
+    }
+    m_videoInfoReady = true;
+    m_nativeHeight = maxHeight;
+
+    QString ratio;
+    const QJsonValue ratioValue = video.value("aspect_ratio");
+    if (ratioValue.isString()) ratio = ratioValue.toString();
+    if (ratio.isEmpty() && maxWidth > 0 && maxHeight > 0) {
+        const int divisor = std::gcd(maxWidth, maxHeight);
+        ratio = QStringLiteral("%1:%2").arg(maxWidth / divisor).arg(maxHeight / divisor);
+    }
+    QStringList details;
+    if (maxWidth > 0 && maxHeight > 0) details << QStringLiteral("%1 × %2").arg(maxWidth).arg(maxHeight);
+    if (!ratio.isEmpty()) details << L("Aspect %1", "비율 %1").arg(ratio);
+    if (fps > 0.0) details << L("%1 FPS", "%1 FPS").arg(QString::number(fps, 'f', fps == int(fps) ? 0 : 2));
+    const QString duration = video.value("duration_string").toString();
+    if (!duration.isEmpty()) details << duration;
+    const QString uploader = video.value("uploader").toString();
+    if (!uploader.isEmpty()) details << uploader;
+    m_infoTitle->setText(video.value("title").toString(L("Video information", "영상 정보")));
+    m_infoDetails->setText(details.join(QStringLiteral("  ·  ")));
+
+    QString thumbnail = video.value("thumbnail").toString();
+    if (thumbnail.isEmpty()) {
+        const QJsonArray thumbnails = video.value("thumbnails").toArray();
+        for (const QJsonValue& value : thumbnails) {
+            const QString candidate = value.toObject().value("url").toString();
+            if (!candidate.isEmpty()) thumbnail = candidate;
+        }
+    }
+    if (!thumbnail.isEmpty()) loadThumbnail(thumbnail, m_infoGeneration);
+}
+
+void VideoDownloaderDialog::showVideoInfoError(const QString& message)
+{
+    m_videoInfoReady = false;
+    m_nativeHeight = 0;
+    m_infoTitle->setText(L("Video information unavailable", "영상 정보를 불러올 수 없음"));
+    m_infoDetails->setText(message.isEmpty()
+        ? L("The link may be private, unsupported, or temporarily unavailable. You can still try downloading it.",
+            "비공개이거나 지원하지 않는 링크일 수 있습니다. 그래도 다운로드를 시도할 수 있습니다.")
+        : message);
+}
+
+void VideoDownloaderDialog::loadThumbnail(const QString& url, quint64 generation)
+{
+    QNetworkRequest request{QUrl(url)};
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = m_network->get(request);
+    m_thumbnailReply = reply;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, generation] {
+        const QByteArray data = reply->readAll();
+        const bool succeeded = reply->error() == QNetworkReply::NoError;
+        reply->deleteLater();
+        if (generation != m_infoGeneration) return;
+        if (m_thumbnailReply == reply) m_thumbnailReply = nullptr;
+        QPixmap image;
+        if (succeeded && image.loadFromData(data)) {
+            m_thumbnail->setText(QString());
+            m_thumbnail->setPixmap(image.scaled(m_thumbnail->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        }
+    });
+}
+
 void VideoDownloaderDialog::ensureDownloaderAndStart()
 {
     const QUrl url(m_url->text().trimmed());
@@ -241,55 +631,16 @@ void VideoDownloaderDialog::ensureDownloaderAndStart()
     }
     QSettings().setValue("videoDownloader/dir", QDir::fromNativeSeparators(m_folder->text().trimmed()));
     m_retriedAfterUpdate = false;
-#ifndef Q_OS_ANDROID
     if (!downloaderPath().isEmpty()) {
         startDownload();
         return;
     }
-#else
+#ifdef Q_OS_ANDROID
     startDownload();
     return;
 #endif
 #ifdef Q_OS_WIN
-    const QString path = QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath("tools/yt-dlp.exe");
-    QDir().mkpath(QFileInfo(path).absolutePath());
-    m_pendingUrl = url.toString();
-    m_pendingFolder = m_folder->text().trimmed();
-    m_installing = true;
-    setBusy(true);
-    m_status->setText(L("Preparing yt-dlp…", "yt-dlp 준비 중…"));
-    m_log->appendPlainText(L("Downloading the official yt-dlp Windows release.", "공식 yt-dlp Windows 버전을 다운로드합니다."));
-    QNetworkRequest request(QUrl("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"));
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    QNetworkReply* reply = m_network->get(request);
-    connect(reply, &QNetworkReply::downloadProgress, this, [this](qint64 received, qint64 total) {
-        if (total > 0) m_progress->setValue(int(received * 100 / total));
-    });
-    connect(reply, &QNetworkReply::finished, this, [this, reply, path] {
-        const QByteArray data = reply->readAll();
-        const auto error = reply->error();
-        const QString errorText = reply->errorString();
-        reply->deleteLater();
-        if (!m_installing) return;
-        if (error != QNetworkReply::NoError || data.size() < 1024 * 1024) {
-            m_installing = false;
-            setBusy(false);
-            m_status->setText(L("Could not download yt-dlp: %1", "yt-dlp를 다운로드하지 못했습니다: %1").arg(errorText));
-            return;
-        }
-        QFile file(path);
-        if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size()) {
-            m_installing = false;
-            setBusy(false);
-            m_status->setText(L("Could not save yt-dlp in the app data folder.", "앱 데이터 폴더에 yt-dlp를 저장하지 못했습니다."));
-            return;
-        }
-        file.close();
-        m_installing = false;
-        m_progress->setValue(0);
-        m_status->setText(L("yt-dlp is ready.", "yt-dlp 준비 완료."));
-        startDownload();
-    });
+    installDownloader(false);
 #else
     QMessageBox::information(this, L("yt-dlp required", "yt-dlp 필요"),
         L("Install yt-dlp and make it available on PATH, then try again.", "yt-dlp를 설치하고 PATH에 등록한 뒤 다시 시도하세요."));
@@ -328,9 +679,17 @@ void VideoDownloaderDialog::startDownload(bool retry)
         "--progress-template", "download:CHARONOS_PROGRESS:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
         "--print", "after_move:CHARONOS_FILE:%(filepath)s"};
     const QString format = m_format->currentData().toString();
-    if (format == "video-only") args << "-f" << "bestvideo/best";
+    const int height = m_resolution->currentData().toInt();
+    if (format == "video-only") {
+        args << "-f" << (height > 0 ? QStringLiteral("bestvideo[height<=%1]/best[height<=%1]").arg(height)
+                                    : QStringLiteral("bestvideo/best"));
+    }
     else if (format == "audio-only") args << "-f" << "bestaudio/best";
-    else args << "-f" << "bv*+ba/best" << "--merge-output-format" << "mp4/mkv";
+    else {
+        args << "-f" << (height > 0 ? QStringLiteral("bv*[height<=%1]+ba/b[height<=%1]").arg(height)
+                                    : QStringLiteral("bv*+ba/best"))
+             << "--merge-output-format" << "mp4/mkv";
+    }
     const QString cookies = m_cookies->text().trimmed();
     if (!cookies.isEmpty()) args << "--cookies" << cookies;
     args << "-o" << QDir(m_folder->text().trimmed()).filePath("%(title).200B [%(id)s].%(ext)s")
@@ -427,8 +786,11 @@ void VideoDownloaderDialog::setBusy(bool busy)
     m_folder->setEnabled(!busy);
     m_format->setEnabled(!busy);
     m_cookies->setEnabled(!busy);
-    m_download->setEnabled(!busy);
-    m_cancel->setText(busy ? L("Cancel", "취소") : L("Close", "닫기"));
+    const bool video = m_format->currentData().toString() != "audio-only";
+    m_resolution->setEnabled(!busy && !m_infoLoading && m_videoInfoReady && video);
+    m_native->setEnabled(!busy && !m_infoLoading && m_videoInfoReady && m_nativeHeight > 0 && video);
+    m_download->setEnabled(!busy && !m_infoLoading);
+    m_cancel->setText((busy || m_fetchingInfo) ? L("Cancel", "취소") : L("Close", "닫기"));
 }
 
 void VideoDownloaderDialog::cancelOrClose()
@@ -441,11 +803,25 @@ void VideoDownloaderDialog::cancelOrClose()
     }
 #endif
     if (m_installing) {
+        const bool forInfo = m_installForInfo;
         m_installing = false;
+        m_installForInfo = false;
         for (QNetworkReply* reply : m_network->findChildren<QNetworkReply*>()) reply->abort();
+        if (forInfo) {
+            m_infoLoading = false;
+            showVideoInfoError(L("Video information lookup canceled.", "영상 정보 확인을 취소했습니다."));
+        }
         setBusy(false);
         m_status->setText(L("Canceled", "취소됨"));
     } else if (m_process.state() != QProcess::NotRunning) {
+        if (m_fetchingInfo) {
+            m_infoDebounce.stop();
+            m_infoUrl.clear();
+            m_pendingInfoLookup = false;
+            m_infoLoading = false;
+            showVideoInfoError(L("Video information lookup canceled.", "영상 정보 확인을 취소했습니다."));
+            setBusy(false);
+        }
         m_process.kill();
     } else {
         reject();

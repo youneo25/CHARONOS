@@ -2,7 +2,7 @@
   #error PackageDir must point to the deployed application folder
 #endif
 #ifndef Version
-  #define Version "1.1.0"
+  #define Version "1.2.2"
 #endif
 #ifndef DisplayVersion
   #define DisplayVersion Version

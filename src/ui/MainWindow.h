@@ -192,6 +192,8 @@ private:
     void restoreLayout();
     void saveLayout();
     void setViewerOnly(bool on);
+    void toggleFullscreenMode();
+    void setAlwaysOnTop(bool on);
 
     // ---- animator tools
     void buildNotesPanel();
@@ -404,6 +406,9 @@ private:
     QToolButton* m_swatch = nullptr;
     QToolButton* m_compareBtn = nullptr;
     QToolButton* m_zoomBtn = nullptr;
+    QToolButton* m_fullscreenBtn = nullptr;
+    QToolButton* m_viewModeBtn = nullptr;
+    QToolButton* m_topmostBtn = nullptr;
     QToolButton* m_onionBtn = nullptr;
     QMenu* m_onionMenu = nullptr;
     StrokePanel* m_strokePanel = nullptr;
@@ -424,6 +429,7 @@ private:
     double m_brushOpacity = 1.0;
     double m_textSize = 36.0;
     bool m_continueDrawing = false;
+    bool m_drawingMode = false; // when enabled, annotations show only on explicitly drawn frames
     AnnotationList m_clipboard;
 
     // Onion skin (like 2D animation packages): annotation ghosts by key or by frame distance,
@@ -463,6 +469,9 @@ private:
     QWidget* m_bottomBar = nullptr;
     QByteArray m_defaultState;
     bool m_viewerOnly = false;
+    bool m_fullscreenWasViewerOnly = false;
+    bool m_fullscreenWasMaximized = false;
+    bool m_alwaysOnTop = false;
     QByteArray m_beforeViewerOnly;
     QMap<QString, bool> m_panelsBeforeViewerOnly;
     QAction* m_flipAction = nullptr;

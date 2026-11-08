@@ -141,13 +141,14 @@ bool MediaRef::exists() const
 
 // ---------------------------------------------------------------- Source
 
-QVector<Source::Entry> Source::renderable(int frame) const
+QVector<Source::Entry> Source::renderable(int frame, bool explicitOnly) const
 {
     QVector<Entry> out;
     auto it = annotations.upper_bound(frame);
     if (it == annotations.begin()) return out;
     --it;
     const bool inherited = it->first != frame;
+    if (explicitOnly && inherited) return out;
     out.reserve(it->second.size());
     for (const Annotation& a : it->second) out.append({ &a, inherited });
     return out;
@@ -190,12 +191,12 @@ void Source::setExplicit(int frame, std::optional<AnnotationList> list)
         annotations.erase(frame);
 }
 
-AnnotationList& Source::editable(int frame)
+AnnotationList& Source::editable(int frame, bool explicitOnly)
 {
     auto it = annotations.find(frame);
     if (it != annotations.end()) return it->second;
     AnnotationList copy;
-    for (const Entry& e : renderable(frame)) copy.append(*e.annotation);
+    for (const Entry& e : renderable(frame, explicitOnly)) copy.append(*e.annotation);
     return annotations[frame] = std::move(copy);
 }
 

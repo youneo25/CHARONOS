@@ -1118,12 +1118,11 @@ void MainWindow::buildWindowMenu()
     panel(L("Scrub Bar", "재생 바"), m_timeline, QKeySequence(), QString(), "ScrubBar");
     panel(L("Transport Bar", "재생 컨트롤 바"), m_bottomBar, QKeySequence(), QString(), "Transport");
     win->addSeparator();
-    QAction* focus = addCommand(win, L("Viewer Only", "뷰어만 보기"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F), [this] { setViewerOnly(!m_viewerOnly); });
+    QAction* focus = addCommand(win, L("View Mode", "보기 모드"), QKeySequence(), [this] { setViewerOnly(!m_viewerOnly); });
     focus->setCheckable(true);
     focus->setIcon(Icons::icon("fit"));
     QAction* full = addCommand(win, L("Full Screen", "전체 화면"), QKeySequence(Qt::Key_F11), [this] {
-        if (isFullScreen()) showNormal();
-        else showFullScreen();
+        toggleFullscreenMode();
     });
     full->setCheckable(true);
     win->addSeparator();
@@ -1229,7 +1228,7 @@ void MainWindow::resetLayout()
 void MainWindow::setViewerOnly(bool on)
 {
     if (on == m_viewerOnly) return;
-    QWidget* const widgets[] = { m_projectPanel, m_timelinePanel, m_toolStrip, m_leftSplit };
+    QWidget* const widgets[] = { m_projectPanel, m_timelinePanel, m_toolStrip, m_leftSplit, menuBar(), m_clipBar };
     if (on) {
         m_beforeViewerOnly = saveState(kLayoutVersion);
         m_panelsBeforeViewerOnly.clear();
@@ -1237,13 +1236,44 @@ void MainWindow::setViewerOnly(bool on)
         for (QWidget* w : widgets) w->hide();
         for (QDockWidget* dock : findChildren<QDockWidget*>()) dock->hide();
         m_viewerOnly = true;
-        showToast(L("Viewer only · Ctrl+Shift+F to bring the panels back", "뷰어만 보기 · Ctrl+Shift+F로 패널 복원"));
+        showToast(L("View mode · use the eye button to restore panels", "보기 모드 · 눈 버튼을 눌러 패널 복원"));
     } else {
         for (QWidget* w : widgets) w->setVisible(m_panelsBeforeViewerOnly.value(w->objectName() + QString::number(quintptr(w)), true));
         restoreState(m_beforeViewerOnly, kLayoutVersion);
         m_viewerOnly = false;
     }
+    if (m_viewModeBtn) m_viewModeBtn->setChecked(m_viewerOnly);
     m_view->fitToView();
+}
+
+void MainWindow::toggleFullscreenMode()
+{
+    if (isFullScreen()) {
+        showNormal();
+        if (m_fullscreenWasMaximized) showMaximized();
+        if (!m_fullscreenWasViewerOnly) setViewerOnly(false);
+        if (m_fullscreenBtn) m_fullscreenBtn->setChecked(false);
+        return;
+    }
+    m_fullscreenWasViewerOnly = m_viewerOnly;
+    m_fullscreenWasMaximized = isMaximized();
+    if (!m_viewerOnly) setViewerOnly(true);
+    showFullScreen();
+    if (m_fullscreenBtn) m_fullscreenBtn->setChecked(true);
+}
+
+void MainWindow::setAlwaysOnTop(bool on)
+{
+    if (on == m_alwaysOnTop) return;
+    const bool wasFullScreen = isFullScreen();
+    const bool wasMaximized = isMaximized();
+    m_alwaysOnTop = on;
+    QSettings().setValue("window/alwaysOnTop", on);
+    setWindowFlag(Qt::WindowStaysOnTopHint, on);
+    if (m_topmostBtn) m_topmostBtn->setChecked(on);
+    if (wasFullScreen) showFullScreen();
+    else if (wasMaximized) showMaximized();
+    else show();
 }
 
 // ============================================================================ frame notes
@@ -1491,7 +1521,7 @@ void MainWindow::buildMotionGraph()
         for (int f : frames)
             if (!t.source->bookmarks.count(f)) {
                 AnnotationList snapshot;
-                for (const Source::Entry& e : t.source->renderable(f)) snapshot.append(t.source->evaluated(*e.annotation, f));
+                for (const Source::Entry& e : t.source->renderable(f, m_drawingMode)) snapshot.append(t.source->evaluated(*e.annotation, f));
                 t.source->bookmarks[f] = snapshot;
                 ++added;
             }

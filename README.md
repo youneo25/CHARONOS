@@ -1,8 +1,8 @@
-# CHARONOS 1.2.1
+# CHARONOS 1.2.2
 
 CHARONOS is a frame-accurate reference and review tool for animators. Load video or image sequences, inspect timing frame by frame, draw annotations, compare takes, track motion, and export review clips.
 
-**Latest release:** [CHARONOS 1.2.1](https://github.com/youneo25/CHARONOS/releases/latest) · **License:** see the repository and bundled third-party notices.
+**Latest release:** [CHARONOS 1.2.2](https://github.com/youneo25/CHARONOS/releases/latest) · **License:** see the repository and bundled third-party notices.
 
 ## Editions
 
@@ -20,7 +20,7 @@ Get the Windows installers, portable archives, and Android APK from the [latest 
 
 ## Video downloader
 
-The video downloader is available in the Windows Full edition. Choose **File → Video Downloader** and paste a link supported by yt-dlp, including YouTube and bilibili. Pick a destination and start the download. CHARONOS adds the completed video to **Sources** without inserting it into the timeline. The dialog supports video with audio, video-only, audio-only, and an optional cookies file for login-restricted content.
+The video downloader is available in the Windows Full edition. Choose **File → Video Downloader**, paste a link supported by yt-dlp, and inspect its preview and media details. Once analyzed, choose a maximum resolution or use **Native** for the source resolution. Pick a destination and start the download. CHARONOS adds the completed video to **Sources** without inserting it into the timeline. The dialog supports video with audio, video-only, audio-only, and an optional cookies file for login-restricted content.
 
 The Lite edition, including the Android APK, does not include video downloading.
 
@@ -37,7 +37,7 @@ The Lite edition, including the Android APK, does not include video downloading.
 ## Documentation
 
 - [User Guide](docs/CHARONOS-User-Guide.html)
-- [CHARONOS 1.2.1 notes](docs/CHANGES-1.2.1.md)
+- [CHARONOS 1.2.2 notes](docs/CHANGES-1.2.2.md)
 - [Android Lite build guide](docs/BUILD-ANDROID.md)
 
 ## Build from source

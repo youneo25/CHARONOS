@@ -4,7 +4,7 @@
 
 #include <atomic>
 
-// UI language. English is the default; Korean is chosen in Tools > Language (applies after restart).
+// UI language. English is the default; Korean is chosen in Edit > Settings > Language (applies after restart).
 namespace Lang {
 
 enum Language { English = 0, Korean = 1 };

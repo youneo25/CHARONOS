@@ -82,7 +82,7 @@ int main(int argc, char* argv[])
         if (wizard.exec() != QDialog::Accepted) SetupWizard::applyDefaults();
     }
 
-    // UI language: English unless Korean was chosen in setup or Tools > Language.
+    // UI language: English unless Korean was chosen in setup or Edit > Settings > Language.
     Lang::set(QSettings().value("ui/language", "en").toString() == "ko" ? Lang::Korean : Lang::English);
 
     // Korean labels for Qt's own dialogs (Yes/No, Save/Discard, file dialogs).
