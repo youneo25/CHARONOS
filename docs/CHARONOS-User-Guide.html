@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CHARONOS 1.0 User Guide</title>
+<title>CHARONOS 1.2.1 User Guide</title>
 <style>
 :root {
   --bg: #1b1b1a; --panel: #242422; --raised: #2e2e2b; --border: #3a3936; --text: #e5e3db; --strong: #faf9f5;
@@ -93,7 +93,7 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
 <div class="layout">
 <nav class="toc" aria-label="Contents">
   <div class="brand">CHARONOS</div>
-  <div class="ver">User Guide · version 1.1</div>
+  <div class="ver">User Guide · version 1.2.1</div>
   <input id="search" type="search" placeholder="Search the guide…" aria-label="Search the guide">
   <ol id="toc">
     <li><a href="#start">Getting started</a></li>
@@ -116,7 +116,6 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
     <li><a href="#workflows">Animator workflows</a></li>
     <li><a href="#shortcuts">Keyboard shortcuts</a></li>
     <li><a href="#troubleshooting">Troubleshooting</a></li>
-    <li><a href="#whatsnew">What's new in 1.1</a></li>
   </ol>
   <div class="theme" role="group" aria-label="Theme">
     <button data-set="auto">Auto</button><button data-set="dark">Dark</button><button data-set="light">Light</button>
@@ -125,15 +124,15 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
 
 <main>
 <header class="hero">
-  <h1>CHARONOS 1.1 User Guide</h1>
-  <p>CHARONOS is a frame-accurate reference player for animators. Load video or image sequences, lay them out on a multi-track timeline, study timing and spacing frame by frame, draw over the picture, read motion through silhouette filters, track motion, compare takes side by side, and keep review notes — with GPU-accelerated playback and an AI assistant connection built in.</p>
+  <h1>CHARONOS 1.2.1 User Guide</h1>
+  <p>CHARONOS is a frame-accurate reference and review tool for animators. Load video or image sequences, inspect timing frame by frame, draw annotations, compare takes, track motion, work on a multi-track timeline, and export review clips.</p>
   <div class="pills"><span class="pill">Windows 10 / 11 · x64</span><span class="pill">Frame-exact decoding</span><span class="pill">Multi-track timeline</span><span class="pill">Silhouette analysis</span><span class="pill">NVDEC + GPU colour conversion</span><span class="pill">Built-in MCP server</span></div>
 </header>
 
 <section id="start">
 <h2><span class="n">1</span>Getting started</h2>
 <h3>Install</h3>
-<p>Run <code>CHARONOS-1.0.0-Setup-x64.exe</code>. No administrator rights are needed; the default location is <code>%LOCALAPPDATA%\Programs\CHARONOS</code>. Qt, FFmpeg and the Microsoft C++ runtime are included. Uninstall from Windows Settings › Apps or with <code>unins000.exe</code> in the install folder — your projects are never removed.</p>
+<p>Run <code>CHARONOS-1.2.1-Setup-x64.exe</code>. No administrator rights are needed; the default location is <code>%LOCALAPPDATA%\Programs\CHARONOS</code>. Qt, FFmpeg and the Microsoft C++ runtime are included. Uninstall from Windows Settings › Apps or with <code>unins000.exe</code> in the install folder — your projects are never removed.</p>
 <h3>Your first review in one minute</h3>
 <ol class="steps">
   <li>Drag a video, an image sequence (drop any one frame) or a whole folder onto the window, or use <b>File › Import Media</b> <kbd>Ctrl</kbd>+<kbd>I</kbd>.</li>
@@ -143,7 +142,7 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
   <li>Save the project with <kbd>Ctrl</kbd>+<kbd>S</kbd> (<code>.frvm</code>). Your media is referenced, not copied.</li>
 </ol>
 <div class="callout tip"><b>Tip.</b> Press <kbd>F1</kbd> at any time for the shortcut sheet. It always shows your current keys, including the ones you changed in <b>Tools › HotKey Manager</b>.</div>
-<p>The interface language is English by default; switch to Korean in <b>Tools › Language / 언어</b> (restart to apply).</p>
+<p>The interface language defaults to English. To switch to Korean, choose <b>Tools › Language / 언어</b> and restart the app.</p>
 </section>
 
 <section id="interface">
@@ -181,8 +180,10 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
 </ul>
 <h3>Importing</h3>
 <p>Drop files or folders on the window, the Project View, the Sources list or the Timeline panel. <b>Import Folder</b> <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> brings in a folder tree and keeps its folders in the Project View. New sources are added to the end of the timeline.</p>
+<h3>Video downloader</h3>
+<p>Choose <b>File › Video Downloader</b>, paste a link supported by yt-dlp (including YouTube and bilibili), choose a destination, then click <b>Download</b>. The window shows progress. Completed videos are added to <b>Sources</b> without being inserted on the timeline. Windows prepares the official yt-dlp executable the first time it is needed. On Android, configure Termux with Python and yt-dlp, enable external commands, grant CHARONOS the Termux Run Commands permission, and allow Termux to access shared storage.</p>
 <h3>Projects</h3>
-<p>A project (<code>.frvm</code>, JSON) stores your sources, timeline and trims, drawings, bookmarks, frame notes, tracks and settings. Media paths are saved absolute and relative to the project, so a project folder can be moved together with its media. If a file is missing when you open a project, CHARONOS asks you to locate it. Older <code>.frvm</code> files and Electron-era <code>.json</code> projects open as well; 1.0 projects stay readable by earlier builds (they ignore trims and notes).</p>
+<p>A project (<code>.frvm</code>, JSON) stores your sources, timeline and trims, drawings, bookmarks, frame notes, tracks and settings. Media paths are saved absolute and relative to the project, so a project folder can be moved together with its media. If a file is missing when you open a project, CHARONOS asks you to locate it.</p>
 </section>
 
 <section id="playback">
@@ -264,7 +265,6 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
 <tr><td><kbd>+</kbd> / <kbd>−</kbd> · <kbd>Shift</kbd>+<kbd>Z</kbd></td><td>Zoom around the playhead · fit the whole timeline. <kbd>Ctrl</kbd>+wheel zooms at the pointer, <kbd>Shift</kbd>+wheel scrolls the tracks, middle-drag pans.</td></tr>
 </table>
 <p>Every edit is one undo step (<kbd>Ctrl</kbd>+<kbd>Z</kbd>). Track switches (eye, lock, mute, solo) are saved with the project but are not undo steps.</p>
-<div class="callout"><b>Projects from 1.0</b> open unchanged: their clips are placed back to back on V1 and each clip's sound becomes a linked clip on A1. 1.1 saves <code>.frvm</code> version 7; CHARONOS 1.0 can still open it (it plays the video clips back to back and ignores tracks, gaps and sound clips).</div>
 </section>
 
 <section id="annotate">
@@ -417,7 +417,7 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
 <ul>
   <li><b>GPU colour conversion.</b> Decoded video stays in its native Y′CbCr form in memory (4:2:0 = 1.5 bytes per pixel instead of 4 for RGB) and is converted to RGB by the graphics card while it is displayed. The same cache therefore holds about 2.6× more frames (62.5 % less memory per 4:2:0 frame, 50 % for 4:2:2 ProRes). Colour matrix (BT.601 / 709 / 2020) and video / full range are taken from the file.</li>
   <li><b>NVDEC hardware decoding.</b> On NVIDIA GPUs, H.264, HEVC, VP9 and AV1 (AV1 needs an RTX 30-series or newer) decode on the GPU's video engine, freeing the CPU for playback, tracking and the UI. Frames go from the decoder straight into the cache in one copy. Formats NVDEC cannot handle (ProRes, 4:2:2 H.264, very large frames) and other GPUs decode on the CPU automatically, and a file that fails on the GPU mid-way switches to the CPU without losing your place. Toggle with <b>Tools › Hardware Decoding (NVDEC)</b>; Properties shows which decoder each clip uses.</li>
-  <li><b>Cache memory.</b> <b>Tools › Cache Memory…</b> sets the RAM for decoded frames (default: half of your RAM). The grey band on the scrub bar shows what is cached. CHARONOS reads ahead within the cache budget and keeps room for A, B and the next clip.</li>
+  <li><b>Cache memory.</b> <b>Tools › Cache Memory…</b> sets the RAM for decoded frames (default: 25 % of RAM, up to 8 GB). The grey band on the scrub bar shows what is cached. CHARONOS reads ahead within the cache budget and keeps room for A, B and the next clip.</li>
 </ul>
 <div class="callout tip"><b>Tip.</b> For heavy UHD material, keep NVDEC on and give the cache 8–16 GB. Use <b>Tools › Clear Cache</b> after replacing a file on disk.</div>
 </section>
@@ -596,33 +596,7 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border
 </table>
 </section>
 
-<section id="whatsnew">
-<h2><span class="n">21</span>What's new in 1.1</h2>
-<ul>
-  <li><b>Multi-track timeline</b>: video tracks composited bottom to top, audio tracks, gaps that stay, overwrite or ripple editing, blade tool, snapping, linked picture and sound, copy / paste, nudge, disable, clip colours and exact clip properties.</li>
-  <li><b>Annotation clips</b>: every drawing, text and shape appears as a clip on annotation lanes with its own icon — move, trim, cut, duplicate, recolour, lock; lanes can be hidden or locked. The red review marks stay.</li>
-  <li><b>Independent sound</b>: sound clips with waveforms, gain line, fades, mute; track mute, solo and gain; playback and export use the same mix.</li>
-  <li><b>Compositing</b>: opacity, Add / Screen / Multiply / Difference, picture-in-picture, fixed or automatic canvas.</li>
-  <li><b>Filter menu</b>: silhouette, moving silhouette (background plate), edge lines, value, notan and motion highlight, live settings and export.</li>
-  <li><b>Navigation</b>: edit points on every track, J / K / L shuttle with reverse play, mark clip, go to In / Out, a timecode readout in the timeline.</li>
-  <li><b>AI assistants</b>: the <code>timeline</code> tool now places clips on tracks and sets their compositing and sound; new <code>annotation_clips</code> and <code>set_filter</code> tools.</li>
-  <li><b>Fixes</b>: onion-skin ghosts of a clip stay under higher tracks; the regression checks grew to 65.</li>
-</ul>
-<h3>1.0</h3>
-<ul>
-  <li><b>GPU colour conversion</b>: frames are cached as Y′CbCr and converted on the GPU — about 60 % less cache memory, faster uploads.</li>
-  <li><b>NVDEC hardware decoding</b> with automatic CPU fallback, direct copy into the cache, and a per-clip decoder readout.</li>
-  <li><b>Timeline panel</b> (Window › Timeline, hidden by default): trimming, splitting, drag-and-drop reordering, snapping, thumbnails, waveforms and full undo.</li>
-  <li><b>Window menu</b>: every panel and bar can be brought back; viewer-only and full-screen modes; layouts persist and can be reset.</li>
-  <li><b>Onion skin</b> rebuilt to work like animation tools: key or frame-distance modes, separate before / after counts for drawings and video, step, falloff opacity, tint colours, optional display during playback.</li>
-  <li><b>Animator tools</b>: Motion Graph with spacing chart and key-pose suggestions, frame notes with export, play on 2s/3s/4s, playback speed presets, mirror view and frame counter overlay.</li>
-  <li><b>AI assistants</b>: built-in MCP server with 24 tools and the <code>charonos-mcp.exe</code> bridge.</li>
-  <li><b>Help</b>: a searchable shortcut sheet that reflects your own key bindings, and this guide.</li>
-  <li><b>Uniform icons</b>: every icon is normalised to the same size and stroke weight.</li>
-  <li><b>Stability</b>: fixed a crash when editing the frame rate in Properties, safer cache limits, decoder fallback on GPU errors, out-of-memory handling in the decoder threads, validation of project files, and more regression tests (51).</li>
-</ul>
-<footer>CHARONOS 1.1 · Built with Qt, FFmpeg (GPL) and OpenGL. © CHARONOS. This guide ships with the application and works offline.</footer>
-</section>
+<footer>CHARONOS 1.2.1 · Built with Qt, FFmpeg (GPL) and OpenGL. © CHARONOS. This guide ships with the application and works offline.</footer>
 </main>
 </div>
 <script>

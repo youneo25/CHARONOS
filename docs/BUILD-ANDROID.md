@@ -1,68 +1,42 @@
-# Building CHARONOS Lite for Android
+# Build CHARONOS Lite for Android
 
-The Android build is always the Lite edition (no timeline editor, motion graph or AI / MCP).
-It targets arm64-v8a phones and tablets with Android 8.0 (API 26) or newer.
+The Android app is always CHARONOS Lite and targets arm64-v8a devices running Android 8.0 (API 26) or later.
 
-## Tools
+## Requirements
 
-| Tool | Version used for 1.2.0 | Where |
-| --- | --- | --- |
-| Qt for Android | 6.10.3 `android_arm64_v8a` | `aqt install-qt all_os android 6.10.3 android_arm64_v8a -O C:\dev\Qt` |
-| Qt for the host | 6.10.3 `msvc2022_64` | already used for the Windows build |
-| Android SDK | platforms 35+, build-tools 35 | Android Studio SDK manager or `sdkmanager` |
-| Android NDK | 27.0.12077973 | SDK manager |
-| JDK | 17 | e.g. Microsoft Build of OpenJDK 17 (zip) |
-| CMake / Ninja | 3.21+ | the same as the Windows build |
+- Qt for Android and a matching host Qt installation
+- Android SDK platform and build-tools
+- Android NDK
+- JDK 17
+- CMake 3.21+ and Ninja
+- FFmpeg shared libraries built for Android arm64-v8a
 
-## FFmpeg for Android
+The project build used Qt 6.10.3, NDK 27.0.12077973, and JDK 17. Use compatible versions for your local toolchain.
 
-The APK ships its own FFmpeg (LGPL, shared). MP4 export on Android uses FFmpeg's own MPEG-4
-encoder (no x264 in this build; the device MediaCodec encoder was not reliable enough), ProRes and
-image sequences work as on Windows. Built from the official 8.1.3 source with the NDK's clang
-from Git Bash; `make` is the NDK's `prebuilt/windows-x86_64/bin/make.exe`:
+## Build FFmpeg
 
-```
-./configure --prefix=/c/dev/ffmpeg-android/arm64-v8a \
-  --target-os=android --arch=aarch64 --cpu=armv8-a --enable-cross-compile \
-  --cc=$TC/bin/clang.exe --cxx=$TC/bin/clang++.exe --ld=$TC/bin/clang.exe \
-  --ar=$TC/bin/llvm-ar.exe --nm=$TC/bin/llvm-nm.exe --ranlib=$TC/bin/llvm-ranlib.exe --strip=$TC/bin/llvm-strip.exe \
-  --sysroot=$TC/sysroot --host-cc=$TC/bin/clang.exe \
-  --host-cflags="--target=aarch64-linux-android26 --sysroot=$TC/sysroot" \
-  --extra-cflags="--target=aarch64-linux-android26 -O3 -fPIC" \
-  --extra-ldflags="--target=aarch64-linux-android26 -Wl,-z,max-page-size=16384" \
-  --enable-shared --disable-static --enable-pic --disable-programs --disable-doc \
-  --disable-avdevice --disable-avfilter --disable-network --disable-debug --disable-symver \
-  --enable-jni --enable-mediacodec --pkg-config=false
-```
+Configure FFmpeg for Android arm64-v8a with the NDK toolchain. The APK expects shared libraries for `avformat`, `avcodec`, `avutil`, `swscale`, and `swresample`. Set `FFMPEG_ROOT` to the directory containing their `include/` and `lib/` folders.
 
-(`$TC` = `<NDK>/toolchains/llvm/prebuilt/windows-x86_64`; set `TMPDIR` to a POSIX path such as
-`/c/dev/android-deps/tmp`.) On Windows the shared-library link line is longer than a command line
-may be: in `ffbuild/library.mak` write the object list with make's `$(file >$@.objs,...)` instead of
-`echo ... > $@.objs`.
+## Configure and build the APK
 
-## Configure and build
+From a Visual Studio Developer Command Prompt or a shell with the Android toolchain configured:
 
-```
-cmake -S . -B build-android -G Ninja -DCMAKE_BUILD_TYPE=Release ^
-  -DCMAKE_TOOLCHAIN_FILE=C:\dev\Qt\6.10.3\android_arm64_v8a\lib\cmake\Qt6\qt.toolchain.cmake ^
-  -DQT_HOST_PATH=C:\dev\Qt\6.10.3\msvc2022_64 ^
-  -DANDROID_SDK_ROOT=%LOCALAPPDATA%\Android\Sdk -DANDROID_NDK_ROOT=%LOCALAPPDATA%\Android\Sdk\ndk\27.0.12077973 ^
-  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 ^
+```powershell
+$env:JAVA_HOME = 'C:\dev\jdk17\jdk-17.0.21.0.2+1'
+$env:ANDROID_SDK_ROOT = "$env:LOCALAPPDATA\Android\Sdk"
+$env:ANDROID_NDK_ROOT = "$env:ANDROID_SDK_ROOT\ndk\27.0.12077973"
+
+cmake -S . -B build-android -G Ninja `
+  -DCMAKE_TOOLCHAIN_FILE=C:/dev/Qt/6.10.3/android_arm64_v8a/lib/cmake/Qt6/qt.toolchain.cmake `
+  -DQT_HOST_PATH=C:/dev/Qt/6.10.3/msvc2022_64 `
+  -DANDROID_ABI=arm64-v8a `
+  -DANDROID_PLATFORM=android-26 `
   -DFFMPEG_ROOT=C:/dev/ffmpeg-android/arm64-v8a
 cmake --build build-android --target apk
 ```
 
-Sign the release APK with `apksigner` from the SDK build-tools (zipalign first). Keep the
-keystore: Android only installs an update over an existing install when it is signed with the same
-key.
+The build output is an unsigned release APK. Align and sign it with `zipalign` and `apksigner` using the release keystore for this app. Keep using the same signing key for updates so Android can install them over an existing copy.
 
-## What is different on Android
+## Android video downloads
 
-- Sound plays through AAudio (`src/media/AudioEngineAndroid.cpp`); everything else is the shared code.
-- Files are opened by path through Qt's own file dialog (the app asks for "All files access"), so a
-  project saved on the phone keeps paths that also resolve on Windows; missing media is looked up
-  by name next to the project.
-- Touch: one finger draws / selects, two fingers pan and pinch-zoom, three fingers scrub, long press
-  opens the context menu. Once a pen has been used, fingers only pan (Tools › Draw with Pen Only).
-- Updates: Help › Check for Updates uses the Android HTTP stack (Qt has no TLS backend there) and
-  opens the APK download in the browser.
+Video downloads use yt-dlp through Termux. Install Termux from its official distribution, then set up Python, yt-dlp, and shared storage in Termux. Enable `allow-external-apps` in `~/.termux/termux.properties`, restart Termux, and grant CHARONOS the Termux **Run Commands** permission in Android settings. Termux also needs access to shared storage. The downloader UI reports when this setup is missing.
