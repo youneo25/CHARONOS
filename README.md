@@ -1,6 +1,6 @@
 # CHARONOS 1.2 (C++ / Qt6 / FFmpeg / OpenGL)
 
-애니메이터를 위한 프레임 단위 레퍼런스 리뷰·분석 도구. 사용 설명서(영문): [docs/CHARONOS-User-Guide.html](docs/CHARONOS-User-Guide.html) (앱의 Help › User Guide). 변경 내역: [docs/CHANGES-1.2.0.md](docs/CHANGES-1.2.0.md).
+애니메이터를 위한 프레임 단위 레퍼런스 리뷰·분석 도구. 사용 설명서(영문): [docs/CHARONOS-User-Guide.html](docs/CHARONOS-User-Guide.html) (앱의 Help › User Guide). 변경 내역: [docs/CHANGES-1.2.1.md](docs/CHANGES-1.2.1.md).
 
 ## 받기
 
