@@ -40,4 +40,7 @@ QByteArray httpGet(const QString& url, int timeoutMs, QString* error);
 // Opens a web page or a downloaded file with the system.
 bool openExternal(const QString& urlOrPath);
 
+// Android delegates yt-dlp execution to the user's Termux install.
+bool startYtDlpDownload(const QString& url, const QString& folder, const QString& token, QString* error);
+
 } // namespace Platform

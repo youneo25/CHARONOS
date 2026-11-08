@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
@@ -16,11 +17,72 @@ import androidx.core.content.FileProvider;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
+import java.io.FileOutputStream;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
 import java.net.HttpURLConnection;
 import java.net.URL;
 
 // Small bridge for the native code (Platform.cpp): storage access, HTTPS and opening files.
 public class CharonosHelper {
+
+    private static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\\''") + "'";
+    }
+
+    // Run yt-dlp in Termux: Android does not provide an app-local Python runtime.
+    // Status, progress and output paths are written in the shared download folder for CHARONOS to poll.
+    public static int startYtDlpDownload(Context context, String url, String folder, String token) {
+        try {
+            context.getPackageManager().getPackageInfo("com.termux", 0);
+        } catch (Exception e) {
+            return 1;
+        }
+        if (context.checkSelfPermission("com.termux.permission.RUN_COMMAND") != PackageManager.PERMISSION_GRANTED) {
+            try {
+                Intent settings = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + context.getPackageName()));
+                settings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                context.startActivity(settings);
+            } catch (Exception ignored) {}
+            return 2;
+        }
+        try {
+            File outputDir = new File(folder);
+            if (!outputDir.exists() && !outputDir.mkdirs()) return 3;
+            String base = ".charonos-yt-dlp-" + token;
+            File scriptFile = new File(outputDir, base + ".sh");
+            File statusFile = new File(outputDir, base + ".status");
+            File logFile = new File(outputDir, base + ".log");
+            statusFile.delete();
+            logFile.delete();
+
+            String template = new File(outputDir, "%(title).200B [%(id)s].%(ext)s").getPath();
+            String script = "#!/data/data/com.termux/files/usr/bin/bash\n" +
+                "yt-dlp --newline --no-warnings --no-playlist " +
+                "--progress-template " + shellQuote("download:CHARONOS_PROGRESS:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s") + " " +
+                "--print-to-file " + shellQuote("after_move:CHARONOS_FILE:%(filepath)s") + " " + shellQuote(statusFile.getPath()) + " " +
+                "-f " + shellQuote("best[ext=mp4]/best") + " -o " + shellQuote(template) + " " + shellQuote(url) +
+                " > " + shellQuote(logFile.getPath()) + " 2>&1\n" +
+                "rc=$?\nprintf 'CHARONOS_EXIT:%s\\n' \"$rc\" >> " + shellQuote(statusFile.getPath()) + "\nexit \"$rc\"\n";
+            try (OutputStreamWriter writer = new OutputStreamWriter(new FileOutputStream(scriptFile), StandardCharsets.UTF_8)) {
+                writer.write(script);
+            }
+
+            Intent run = new Intent();
+            run.setClassName("com.termux", "com.termux.app.RunCommandService");
+            run.setAction("com.termux.RUN_COMMAND");
+            run.putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/bash");
+            run.putExtra("com.termux.RUN_COMMAND_ARGUMENTS", new String[]{scriptFile.getPath()});
+            run.putExtra("com.termux.RUN_COMMAND_WORKDIR", "/data/data/com.termux/files/home");
+            run.putExtra("com.termux.RUN_COMMAND_BACKGROUND", true);
+            run.putExtra("com.termux.RUN_COMMAND_LABEL", "CHARONOS video download");
+            context.startService(run);
+            return 0;
+        } catch (Exception e) {
+            return 3;
+        }
+    }
 
     // Media and projects are read by path (so a project opens the same way on Windows).
     public static boolean hasStorageAccess(Context context) {

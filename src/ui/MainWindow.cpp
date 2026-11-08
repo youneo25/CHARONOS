@@ -8,6 +8,7 @@
 #include "model/AnnotationPainter.h"
 #include "ui/ABDelegate.h"
 #include "ui/ExportDialog.h"
+#include "ui/VideoDownloaderDialog.h"
 #include "ui/FrameExportDialog.h"
 #include "ui/ConsoleDock.h"
 #include "ui/HotkeyManager.h"
@@ -1010,6 +1011,13 @@ void MainWindow::buildMenus()
     add(file, L("Open Project...", "프로젝트 열기..."), QKeySequence(Qt::CTRL | Qt::Key_O), [this] { openProjectDialog(); });
     add(file, L("Import Media...", "미디어 가져오기..."), QKeySequence(Qt::CTRL | Qt::Key_I), [this] { importDialog(); });
     add(file, L("Import Folder...", "폴더 가져오기..."), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_I), [this] { importFolderDialog(); });
+    add(file, L("Video Downloader...", "비디오 다운로더..."), QKeySequence(), [this] {
+        VideoDownloaderDialog dialog(this);
+        connect(&dialog, &VideoDownloaderDialog::downloaded, this, [this](const QString& path) {
+            importPaths({path}, false);
+        });
+        dialog.exec();
+    });
     add(nullptr, L("New Project (2D Animation)", "새 프로젝트 (2D 애니메이션)"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_N), [this] { newCanvasDialog(); });
     file->addSeparator();
     add(file, L("Save", "저장"), QKeySequence::Save, [this] { saveProject(false); });
