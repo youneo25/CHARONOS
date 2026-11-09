@@ -1,54 +1,24 @@
-# CHARONOS 1.2.2
+# CHARONOS
 
-CHARONOS is a frame-accurate reference and review tool for animators. Load video or image sequences, inspect timing frame by frame, draw annotations, compare takes, track motion, and export review clips.
+<img width="2559" height="1379" alt="image" src="https://github.com/user-attachments/assets/3507a3f7-b206-4a24-9f8c-5c24b8885e37" />
 
-**Latest release:** [CHARONOS 1.2.2](https://github.com/youneo25/CHARONOS/releases/latest) · **License:** see the repository and bundled third-party notices.
 
-## Editions
+CHARONOS는 애니메이션과 영상 작업을 위한 프레임 단위 레퍼런스·검토 프로그램입니다. 영상을 한 프레임씩 살펴보고, 여러 장면이나 테이크를 비교하며, 화면 위에 주석과 메모를 남겨 작업 내용을 정리할 수 있습니다.
 
-| Edition | Platform | Included features |
-| --- | --- | --- |
-| CHARONOS | Windows 10/11, x64 | Full timeline editor, Motion Graph, AI/MCP tools, and all review features |
-| CHARONOS Lite | Windows 10/11, x64 | Review and annotation features without the timeline editor, Motion Graph, or AI/MCP tools |
-| CHARONOS Lite | Android 8+, arm64 | Lite features with touch and pen support |
+## 주요 기능
 
-All editions use the same `.frvm` project format. Keep media beside the project when moving it between devices.
+- **정밀한 프레임 탐색**: 영상과 이미지 시퀀스를 프레임 단위로 재생하고 살펴봅니다.
+- **A/B 비교**: 두 소스를 나란히 놓거나, 위아래로 배치하거나, 와이프와 오버레이 방식으로 비교합니다. 시간 또는 프레임 기준으로 동기화할 수 있습니다.
+- **화면 주석**: 펜, 도형, 화살표, 텍스트 등으로 화면에 표시하고 아이디어와 수정 사항을 전달합니다.
+- **모션 트래킹**: 화면 속 움직임을 따라 경로를 기록하고 프레임 간 이동을 확인합니다.
+- **검토 도구**: 프레임 메모, 북마크, 어니언 스킨, 그리드와 영상 분석 필터로 장면을 자세히 살펴봅니다.
+- **내보내기**: 주석을 포함한 스틸 이미지나 검토용 영상, 이미지 시퀀스를 저장합니다.
+- **프로젝트 관리**: 소스, 타임라인, 주석과 검토 정보를 프로젝트로 정리하고 저장합니다.
 
-## Download and install
+## 에디션
 
-Get the Windows installers, portable archives, and Android APK from the [latest release](https://github.com/youneo25/CHARONOS/releases/latest). The Windows installer does not require administrator rights. On Android, grant file access when prompted.
+CHARONOS Full은 타임라인 편집기, Motion Graph, AI/MCP 연동을 포함합니다. CHARONOS Lite는 타임라인 편집기, Motion Graph, AI/MCP 연동을 제외한 레퍼런스 확인과 주석·검토 기능에 집중합니다. 두 에디션은 같은 프로젝트 형식을 사용합니다.
 
-## Video downloader
+## 활용 예시
 
-The video downloader is available in the Windows Full edition. Choose **File → Video Downloader**, paste a link supported by yt-dlp, and inspect its preview and media details. Once analyzed, choose a maximum resolution or use **Native** for the source resolution. Pick a destination and start the download. CHARONOS adds the completed video to **Sources** without inserting it into the timeline. The dialog supports video with audio, video-only, audio-only, and an optional cookies file for login-restricted content.
-
-The Lite edition, including the Android APK, does not include video downloading.
-
-## Core features
-
-- Frame-accurate playback for video and image sequences
-- Multi-track editing, linked audio, trimming, compositing, and undo
-- Drawing, text, shapes, frame notes, and onion skin
-- A/B comparison with wipe, split, blend, synchronization, and offset controls
-- Motion tracking, Motion Graph, bookmarks, and viewing aids
-- Silhouette and motion analysis filters
-- Video, audio, still-frame, and image-sequence export
-
-## Documentation
-
-- [User Guide](docs/CHARONOS-User-Guide.html)
-- [CHARONOS 1.2.2 notes](docs/CHANGES-1.2.2.md)
-- [Android Lite build guide](docs/BUILD-ANDROID.md)
-
-## Build from source
-
-Build the Windows edition with CMake, Qt 6, MSVC 2022, and FFmpeg. Android Lite requires the Qt Android kit, Android SDK/NDK, JDK 17, and Android FFmpeg libraries. See the platform build guide for the Android configuration.
-
-```powershell
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
-  -DCMAKE_PREFIX_PATH=C:/dev/Qt/6.10.3/msvc2022_64 `
-  -DFFMPEG_ROOT=C:/dev/ffmpeg
-cmake --build build --target CHRONOS
-```
-
-Set `-DCHARONOS_LITE=ON` to build CHARONOS Lite for Windows. Android builds are always Lite.
+애니메이션 포즈를 이전·다음 프레임과 비교하거나, 여러 테이크의 차이를 확인하고, 수정이 필요한 지점에 주석을 남겨 팀에 전달할 수 있습니다. CHARONOS는 레퍼런스를 확인하고 검토 내용을 명확하게 공유하는 작업을 돕습니다.
