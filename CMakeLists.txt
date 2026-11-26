@@ -4,11 +4,8 @@ set(CHARONOS_DISPLAY_VERSION "${PROJECT_VERSION}")
 set(CHARONOS_PACKAGE_VERSION "${PROJECT_VERSION}")
 
 # CHARONOS Lite: the same viewer, annotation and export tools without the multi-track timeline
-# editor, the motion graph and the AI (MCP) integration. Android builds are always Lite.
+# editor, the motion graph and the AI (MCP) integration.
 option(CHARONOS_LITE "Build CHARONOS Lite" OFF)
-if(ANDROID)
-  set(CHARONOS_LITE ON CACHE BOOL "" FORCE)
-endif()
 if(CHARONOS_LITE)
   set(CHARONOS_PRODUCT "CHARONOS Lite")
   set(CHARONOS_EXE "CHARONOS-Lite")
@@ -21,25 +18,15 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-if(ANDROID)
-  set(FFMPEG_ROOT "C:/dev/ffmpeg-android/arm64-v8a" CACHE PATH "FFmpeg for Android (include/, lib/*.so)")
-else()
-  set(FFMPEG_ROOT "C:/dev/ffmpeg" CACHE PATH "FFmpeg shared dev build (include/, lib/, bin/)")
-endif()
+set(FFMPEG_ROOT "C:/dev/ffmpeg" CACHE PATH "FFmpeg shared dev build (include/, lib/, bin/)")
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Svg Network)
 
 set(FFMPEG_LIBS avformat avcodec avutil swscale swresample)
 add_library(ffmpeg INTERFACE)
 target_include_directories(ffmpeg INTERFACE "${FFMPEG_ROOT}/include")
-set(FFMPEG_SHARED_LIBS "")
 foreach(lib ${FFMPEG_LIBS})
-  if(ANDROID)
-    target_link_libraries(ffmpeg INTERFACE "${FFMPEG_ROOT}/lib/lib${lib}.so")
-    list(APPEND FFMPEG_SHARED_LIBS "${FFMPEG_ROOT}/lib/lib${lib}.so")
-  else()
-    target_link_libraries(ffmpeg INTERFACE "${FFMPEG_ROOT}/lib/${lib}.lib")
-  endif()
+  target_link_libraries(ffmpeg INTERFACE "${FFMPEG_ROOT}/lib/${lib}.lib")
 endforeach()
 
 set(APP_SOURCES
@@ -97,18 +84,10 @@ if(NOT CHARONOS_LITE)
   list(APPEND APP_SOURCES src/ui/MainWindowAi.cpp src/ai/McpServer.h src/ai/McpServer.cpp
        src/ui/VideoDownloaderDialog.h src/ui/VideoDownloaderDialog.cpp)
 endif()
-if(ANDROID)
-  list(APPEND APP_SOURCES src/media/AudioEngineAndroid.cpp)
-else()
-  configure_file(res/app.rc.in "${CMAKE_BINARY_DIR}/app.rc" @ONLY)
-  list(APPEND APP_SOURCES src/media/AudioEngine.cpp src/FileAssociation.h src/FileAssociation.cpp "${CMAKE_BINARY_DIR}/app.rc")
-endif()
+configure_file(res/app.rc.in "${CMAKE_BINARY_DIR}/app.rc" @ONLY)
+list(APPEND APP_SOURCES src/media/AudioEngine.cpp src/FileAssociation.h src/FileAssociation.cpp "${CMAKE_BINARY_DIR}/app.rc")
 
-if(ANDROID)
-  qt_add_executable(CHRONOS ${APP_SOURCES})
-else()
-  add_executable(CHRONOS WIN32 ${APP_SOURCES})
-endif()
+add_executable(CHRONOS WIN32 ${APP_SOURCES})
 
 qt_add_resources(CHRONOS "app_resources" PREFIX "/" BASE res FILES res/app.png)
 
@@ -125,23 +104,6 @@ if(MSVC)
   target_compile_options(CHRONOS PRIVATE /utf-8 /W3 /permissive- /MP)
 endif()
 target_link_libraries(CHRONOS PRIVATE Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Svg Qt6::Network ffmpeg)
-
-if(ANDROID)
-  # Qt's own Korean strings for its dialogs, read from the resources.
-  get_target_property(QT_QMAKE Qt6::qmake IMPORTED_LOCATION)
-  qt_add_resources(CHRONOS "qt_translations" PREFIX "/translations" BASE "${QT6_INSTALL_PREFIX}/translations"
-    FILES "${QT6_INSTALL_PREFIX}/translations/qtbase_ko.qm")
-  target_link_libraries(CHRONOS PRIVATE aaudio log android)
-  set_target_properties(CHRONOS PROPERTIES
-    QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_SOURCE_DIR}/android"
-    QT_ANDROID_EXTRA_LIBS "${FFMPEG_SHARED_LIBS}"
-    QT_ANDROID_MIN_SDK_VERSION 26
-    QT_ANDROID_TARGET_SDK_VERSION 35
-    QT_ANDROID_VERSION_NAME "${PROJECT_VERSION}"
-    QT_ANDROID_VERSION_CODE "${PROJECT_VERSION_MAJOR}${PROJECT_VERSION_MINOR}${PROJECT_VERSION_PATCH}00"
-    QT_ANDROID_APP_NAME "${CHARONOS_PRODUCT}")
-  return()
-endif()
 
 target_link_libraries(CHRONOS PRIVATE winmm shell32 psapi)
 

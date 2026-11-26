@@ -22,4 +22,3 @@ CMakeUserPresets.json
 .env.*
 !.env.example
 /build-lite/
-/build-android/

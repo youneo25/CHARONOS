@@ -1,16 +1,14 @@
 # Packages a CHARONOS release: Full and Lite for Windows (installer + portable ZIP each), the
-# Android Lite APK when it was built, the source ZIP and SHA256SUMS.
+# source ZIP and SHA256SUMS.
 #
 #   tools\package-release.ps1 -OutputDir D:\release -Compiler C:\dev\InnoSetup\ISCC.exe
 #
-# Builds first: build-test (Full, Release), build-lite (-DCHARONOS_LITE=ON) and optionally
-# build-android (see docs/BUILD-ANDROID.md); -Apk points at a signed APK.
+# Builds first: build-test (Full, Release) and build-lite (-DCHARONOS_LITE=ON).
 param(
     [Parameter(Mandatory = $true)][string]$OutputDir,
     [string]$Compiler = 'C:\dev\InnoSetup\ISCC.exe',
     [string]$FullBuild = 'build-test',
     [string]$LiteBuild = 'build-lite',
-    [string]$Apk = '',
     [string]$Qt = 'C:\dev\Qt\6.10.3\msvc2022_64',
     [string]$FFmpeg = 'C:\dev\ffmpeg'
 )
@@ -65,12 +63,6 @@ foreach ($edition in @(@{ Name = 'CHARONOS'; Build = $FullBuild; Exe = 'CHARONOS
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip }
     Compress-Archive -LiteralPath $stage -DestinationPath $zip -CompressionLevel Optimal
     $artifacts += $setup, $zip
-}
-
-if ($Apk) {
-    $apkOut = Join-Path $OutputDir "CHARONOS-Lite-$version-android-arm64.apk"
-    Copy-Item -LiteralPath $Apk -Destination $apkOut -Force
-    $artifacts += $apkOut
 }
 
 $source = Join-Path $OutputDir "CHARONOS-$version-source.zip"
